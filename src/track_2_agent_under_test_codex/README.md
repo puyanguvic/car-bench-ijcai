@@ -1,5 +1,11 @@
 # Track 2 Codex Agent Under Test
 
+> Legacy migration note: Track 2 now uses the direct Cerebras/LiteLLM templates
+> in `src/track_2_agent_under_test_cerebras/` and
+> `src/track_2_agent_under_test_cerebras_planner/`. This Codex app-server
+> template remains temporarily for migration/debugging and is not the current
+> participant starter.
+
 This package is the direct Codex-backed Track 2 agent under test for CAR-bench
 A2A evaluation. It preserves the same wire contract with the evaluator while
 swapping the assistant decision layer to a warm Codex app-server runtime.

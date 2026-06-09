@@ -323,6 +323,9 @@ track-1-agent = [
     { name = "google-genai" },
     { name = "litellm" },
 ]
+track-2-agent = [
+    { name = "litellm" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -338,13 +341,14 @@ requires-dist = [
     { name = "google-genai", marker = "extra == 'track-1-agent'", specifier = ">=1.36.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "litellm", marker = "extra == 'track-1-agent'", specifier = ">=1.85.1" },
+    { name = "litellm", marker = "extra == 'track-2-agent'", specifier = ">=1.85.1" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "nest-asyncio", marker = "extra == 'car-bench-evaluator'", specifier = ">=1.6.0" },
     { name = "pydantic", specifier = ">=2.11.9" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
     { name = "uvicorn", specifier = ">=0.35.0" },
 ]
-provides-extras = ["track-1-agent", "car-bench-evaluator"]
+provides-extras = ["track-1-agent", "track-2-agent", "car-bench-evaluator"]
 
 [package.metadata.requires-dev]
 dev = [

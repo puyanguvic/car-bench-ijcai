@@ -1,5 +1,11 @@
 # Track 2 Codex Planner/Executor Agent Under Test
 
+> Legacy migration note: Track 2 now uses the direct Cerebras/LiteLLM templates
+> in `src/track_2_agent_under_test_cerebras/` and
+> `src/track_2_agent_under_test_cerebras_planner/`. This Codex app-server
+> planner remains temporarily for migration/debugging and is not the current
+> participant starter.
+
 This package is a Track 2 reference implementation for a plan-on-user-turn
 Codex Pro / Cerebras Spark harness:
 

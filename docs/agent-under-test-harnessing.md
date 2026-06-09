@@ -46,22 +46,20 @@ A robust agent-under-test harness usually has four layers:
 4. **A2A renderer**: Converts the model output into text/data Parts while
    attaching optional turn metrics.
 
-The Track 2 Codex Pro / Cerebras Spark implementation in
-`src/track_2_agent_under_test_codex/` follows this shape and keeps
-Codex-specific app-server details behind `codex_client.py`.
-For Track 2 model selection and multi-pass templates, see
-`docs/codex-harness-patterns.md`. A concrete planner/executor reference agent
-lives in `src/track_2_agent_under_test_codex_planner/`, and a Python-call DSL
-reference agent lives in `src/track_2_agent_under_test_codex_python/`.
+The Track 2 Cerebras Fast-Reasoning implementation in
+`src/track_2_agent_under_test_cerebras/` follows this shape and keeps direct
+LiteLLM/Cerebras details behind a small client wrapper. For Track 2 model
+selection, public-tier scheduling, and multi-pass templates, see
+`docs/cerebras-harness-patterns.md`. A concrete planner/executor reference
+agent lives in `src/track_2_agent_under_test_cerebras_planner/`.
 
 Reference packages:
 
 | Package | Purpose |
 |---------|---------|
 | `src/track_1_agent_under_test/` | Minimal LiteLLM-compatible template agent. |
-| `src/track_2_agent_under_test_codex/` | Track 2 Codex app-server agent returning next-action JSON. |
-| `src/track_2_agent_under_test_codex_planner/` | Track 2 private planner plus Spark executor. |
-| `src/track_2_agent_under_test_codex_python/` | Track 2 Python-call DSL parser inspired by programmatic tool calling. |
+| `src/track_2_agent_under_test_cerebras/` | Track 2 direct Cerebras agent returning next-action JSON. |
+| `src/track_2_agent_under_test_cerebras_planner/` | Track 2 private planner plus Cerebras executor. |
 
 ## Important Design Rules
 
@@ -75,8 +73,16 @@ Reference packages:
   tool.
 - Attach latency/token/cost metadata only when you can measure it reliably. It
   is acceptable to report token and cost fields as zero for runtimes that do
-  not expose usage. Codex app-server exposes token usage via
-  `thread/tokenUsage/updated`, but not reliable per-turn billing cost.
+  not expose usage. LiteLLM exposes provider usage when the provider response
+  includes it.
+- Quota-wait metadata must be backed by provider-visible reset events, logs, or
+  rate-limit report files. Ordinary slow inference, malformed-output retries,
+  local queueing, startup time, and planner/tool latency are not quota waits.
+  Successful planner or executor provider calls still count toward
+  `num_llm_calls` and `avg_llm_call_time_ms`; failed rate-limit attempts and
+  scheduler sleeps do not.
+  Official or manual review may compare reported quota waits with raw evaluator
+  timing and provider logs; false or inflated quota-wait reporting is cheating.
 
 ## Agentic Harness Boundaries
 
@@ -88,7 +94,7 @@ boundary is the A2A exchange with the evaluator. Your harness can:
 - Use sub-agent-style code inside your own participant container if each internal
   component only sees benchmark-allowed inputs: the system prompt, transcript,
   tool definitions, and tool results already sent by the evaluator.
-- Swap Codex for another model/runtime while preserving the same A2A output
+- Swap the model/runtime while preserving the same A2A output
   contract.
 
 Your harness must not:
@@ -103,10 +109,10 @@ Your harness must not:
 - Let an external runtime perform uncontrolled side effects that change the
   benchmark state outside the recorded A2A trajectory.
 
-## Codex Harness
+## Track 2 Cerebras Harness
 
-The Codex agent under test uses a warm `codex app-server` process and asks for
-schema-constrained final JSON:
+The direct Track 2 agent calls Cerebras through LiteLLM and asks for
+schema-constrained next-action JSON:
 
 ```json
 {"action": "respond", "content": "Sure, I can help with that.", "tool_calls": []}
@@ -124,25 +130,24 @@ or:
 }
 ```
 
-Each Codex step gets the full CAR-bench transcript and the task-filtered tool
-definitions. The app-server process is initialized during Track 2 server
-startup and stays warm, but each step uses an ephemeral Codex thread so the
-model-visible context is explicit and reproducible.
+Each model step gets the full CAR-bench transcript and the task-filtered tool
+definitions. The reference agent does not rely on hidden provider-side
+conversation memory between benchmark-visible turns, so retries, logs, and
+trajectory inspection stay reproducible.
 `arguments_json` is decoded by the adapter before returning normal A2A
 `{"tool_name": "...", "arguments": {...}}` payloads to the evaluator.
 
 The reference harness deliberately manages conversation state manually: the
-CAR-bench transcript is the source of truth, and Codex does not rely on hidden
-thread memory between benchmark-visible turns. This is slightly more verbose,
-but it makes retries, hallucination scoring, and trajectory inspection much
-easier to reason about. Keep static prompt content first and dynamic transcript
-content last so provider prompt caching has a stable prefix to reuse.
+CAR-bench transcript is the source of truth. Keep static prompt content first
+and dynamic transcript content last so provider prompt caching has a stable
+prefix to reuse when supported.
 
-This Codex harness intentionally does not expose Codex's normal coding-agent
-affordances to the benchmark turn. Dynamic tools, shell commands, file changes,
-permission requests, network access, and user-input requests are denied by the
-adapter. Codex is used here as a constrained next-action reasoning layer, not as
-an unconstrained coding workspace or hidden multi-agent system.
+During development, the Cerebras public tier can have strict rate limits. Use
+smoke scenarios first, configure `TRACK2_LLM_MIN_INTERVAL_SECONDS` for longer
+local runs, and schedule public validation runs instead of launching many at
+once. The reference client logs raw LiteLLM/Cerebras exceptions, but trusted
+quota-wait accounting is intentionally left disabled until the exact raw
+rate-limit error shape is confirmed.
 
 ## Extension Ideas
 
@@ -150,7 +155,7 @@ an unconstrained coding workspace or hidden multi-agent system.
   through for benchmark scoring.
 - Add a reranker or policy-check pass before returning the final A2A response.
 - Use a budget-gated planner/executor or ensemble/condenser pattern, reserving
-  larger models for risky turns and Spark-like models for the common case.
+  larger models for risky turns and fast executor models for the common case.
 - Use CAR-bench's `planning_tool` shape, or your own planning tool/mode, as
   private internal reasoning. Keep it private unless you intentionally want
   the evaluator to execute and record `planning_tool` as a normal benchmark tool call.

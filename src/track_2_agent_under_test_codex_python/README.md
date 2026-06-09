@@ -1,5 +1,11 @@
 # Track 2 Codex Python-Call Agent Under Test
 
+> Legacy migration note: Track 2 now uses the direct Cerebras/LiteLLM templates
+> in `src/track_2_agent_under_test_cerebras/` and
+> `src/track_2_agent_under_test_cerebras_planner/`. This Codex app-server
+> Python-call variant remains temporarily for migration/debugging and is not the
+> current participant starter.
+
 This package is a Track 2 reference implementation for a Python-call DSL
 harness. It uses Codex Pro-backed inference and defaults to
 `gpt-5.3-codex-spark`, the fast executor served on Cerebras infrastructure.
