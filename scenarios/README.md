@@ -23,10 +23,10 @@ Each directory contains the same six-file matrix:
 | --- | --- | --- |
 | `local_smoke.toml` | Local Python | Train split, one task from each task type, one trial |
 | `local_test_set.toml` | Local Python | Public CAR-bench test split, all tasks from each task type, three trials |
-| `local_docker_smoke.toml` | Docker local build | Train split, one task from each task type, one trial |
-| `local_docker_test_set.toml` | Docker local build | Public CAR-bench test split, all tasks from each task type, three trials |
-| `ghcr_smoke.toml` | Docker published image | Train split, one task from each task type, one trial |
-| `ghcr_test_set.toml` | Docker published image | Public CAR-bench test split, all tasks from each task type, three trials |
+| `local_docker_smoke.toml` | Official evaluator image plus local agent build | Train split, one task from each task type, one trial |
+| `local_docker_test_set.toml` | Official evaluator image plus local agent build | Public CAR-bench test split, all tasks from each task type, three trials |
+| `ghcr_smoke.toml` | Official evaluator image plus published agent image | Train split, one task from each task type, one trial |
+| `ghcr_test_set.toml` | Official evaluator image plus published agent image | Public CAR-bench test split, all tasks from each task type, three trials |
 
 The public test-set scenarios are development validation only. Official final
 evaluation is run by the organizers on a hidden test set.
@@ -38,7 +38,7 @@ Every scenario has three main tables:
 ```toml
 [evaluator]
 # local Python: endpoint + cmd
-# Docker: build or image, env, volumes, optional command_args
+# Docker: official evaluator image, env, optional command_args
 
 [agent_under_test]
 # local Python: endpoint + cmd
@@ -54,6 +54,11 @@ Every scenario has three main tables:
 The evaluator wraps CAR-bench and owns the simulated user, tools, environment,
 and scoring.
 
+Docker scenarios use the official organizer-published evaluator image,
+`ghcr.io/car-bench/car-bench-evaluator:latest`. Participants should not build,
+self-host, modify, or submit evaluator images; only the agent-under-test image
+is participant-controlled.
+
 For local Python scenarios, provide:
 
 ```toml
@@ -62,13 +67,12 @@ endpoint = "http://127.0.0.1:8081"
 cmd = "python src/evaluator/server.py --host 127.0.0.1 --port 8081"
 ```
 
-For Docker scenarios, provide either `build` or `image`:
+For Docker scenarios, use the official evaluator image:
 
 ```toml
 [evaluator]
-build = { context = ".", dockerfile = "src/evaluator/Dockerfile.evaluator" }
+image = "ghcr.io/car-bench/car-bench-evaluator:latest"
 env = { GEMINI_API_KEY = "${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}" }
-volumes = ["./third_party/car-bench:/workspace/third_party/car-bench:ro"]
 ```
 
 ### `[agent_under_test]`
@@ -98,6 +102,14 @@ For GHCR scenarios:
 image = "ghcr.io/yourusername/your-agent:latest"
 env = { AGENT_LLM = "${AGENT_LLM:-gemini/gemini-2.5-flash}" }
 ```
+
+Participant GHCR agent images must be public, or explicitly accessible to the
+organizers if a private package is approved. After the first push, check the
+package page under either
+`https://github.com/users/yourusername/packages/container/package/your-agent`
+or `https://github.com/orgs/your-org/packages/container/package/your-agent` and
+set **Package visibility** to **Public**. The scenario `image` value must match
+the pushed GHCR image.
 
 Optional result-label fields help make output filenames and metadata easier to
 read when your harness routes through multiple models:
@@ -153,6 +165,10 @@ Generate Docker Compose from any `local_docker_*.toml` or `ghcr_*.toml` file:
 uv run python generate_compose.py --scenario scenarios/track_1_agent_under_test/local_docker_smoke.toml
 docker compose --env-file .env -f scenarios/track_1_agent_under_test/docker-compose.yml up --abort-on-container-exit
 ```
+
+The generated Compose file pulls the official evaluator image and then either
+builds the local agent-under-test image or pulls the participant-published
+agent-under-test image, depending on the selected scenario.
 
 `generate_compose.py` writes two ignored files into the selected scenario
 folder:

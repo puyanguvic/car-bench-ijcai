@@ -37,6 +37,11 @@ Final ranking is performed by the organizers on a hidden test set. The local
 `local_test_set.toml`, `local_docker_test_set.toml`, and `ghcr_test_set.toml`
 scenarios are for development validation only.
 
+Docker-based scenarios use the official organizer-published evaluator image,
+`ghcr.io/car-bench/car-bench-evaluator:latest`. Participants should build or
+publish only their **agent under test** image; they should not self-host,
+modify, or submit an evaluator image.
+
 CAR-bench includes:
 
 | Dimension | Details |
@@ -240,10 +245,10 @@ agent directory under `scenarios/` has the same six-file matrix:
 | --- | --- |
 | `local_smoke.toml` | Local Python, train split, one task from each task type, one trial |
 | `local_test_set.toml` | Local Python, public CAR-bench test split, three trials |
-| `local_docker_smoke.toml` | Local Docker build, train smoke |
-| `local_docker_test_set.toml` | Local Docker build, public CAR-bench test split |
-| `ghcr_smoke.toml` | Published image, train smoke |
-| `ghcr_test_set.toml` | Published image, public CAR-bench test split |
+| `local_docker_smoke.toml` | Official evaluator image plus local agent build, train smoke |
+| `local_docker_test_set.toml` | Official evaluator image plus local agent build, public CAR-bench test split |
+| `ghcr_smoke.toml` | Official evaluator image plus published agent image, train smoke |
+| `ghcr_test_set.toml` | Official evaluator image plus published agent image, public CAR-bench test split |
 
 ### A. Local Smoke And Debug
 
@@ -261,7 +266,9 @@ Local test-set runs are development validation, not official final evaluation.
 ### B. Docker Local Build
 
 Use this before publishing. It verifies that your Dockerfile and runtime
-environment work without local Python process assumptions.
+environment work without local Python process assumptions. The evaluator service
+is pulled from the official organizer image; only the agent-under-test service
+is built from your local Dockerfile.
 
 | Track | Generate Compose | Run |
 | --- | --- | --- |
@@ -276,6 +283,9 @@ scenario; those generated files are ignored by git.
 ### C. GHCR Image Validation
 
 Use this to test the same kind of image/config that organizers will run.
+Participant agent images must be pullable by the organizers. For the public
+competition workflow, publish the GHCR package as **public** and do not bake API
+keys or other secrets into the image.
 
 Build and push an `linux/amd64` image:
 
@@ -286,6 +296,22 @@ docker build --platform linux/amd64 \
 
 docker push ghcr.io/yourusername/your-agent:latest
 ```
+
+After the first push, open the package page and check **Package settings**:
+
+```text
+https://github.com/users/yourusername/packages/container/package/your-agent
+```
+
+For organization-owned images, use:
+
+```text
+https://github.com/orgs/your-org/packages/container/package/your-agent
+```
+
+Set **Package visibility** to **Public**, or explicitly grant organizer access
+if the image must stay private. The `image = "..."`
+value in your `ghcr_*.toml` file must match the image you pushed.
 
 Then update your `ghcr_smoke.toml` or `ghcr_test_set.toml` image reference and
 validate it:
@@ -314,7 +340,8 @@ Detailed submission mechanics will be announced by the organizers. The expected
 submission shape is:
 
 1. A registered GHCR Docker image for your agent under test, preferably pinned
-   by digest.
+   by digest. The image must be public or explicitly accessible to the
+   organizers.
 2. The scenario/config file needed to run that image.
 3. Required environment variable or secret names, excluding secret values.
 4. Track selection: Track 1, Track 2, or both.
