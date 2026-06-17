@@ -160,6 +160,23 @@ class FogLightFlow:
 
 
 @dataclass
+class DefrostFlow:
+    active: bool = False
+    on: bool = True
+    defrost_window: Literal["ALL", "FRONT", "REAR"] | None = None
+    climate_checked: bool = False
+    windows_checked: bool = False
+    fan_speed: int | None = None
+    fan_airflow_direction: str | None = None
+    air_conditioning: bool | None = None
+    window_driver_position: int | None = None
+    window_passenger_position: int | None = None
+    window_driver_rear_position: int | None = None
+    window_passenger_rear_position: int | None = None
+    completed: bool = False
+
+
+@dataclass
 class ControllerState:
     runtime: RuntimeContext = field(default_factory=RuntimeContext)
     sunroof: SunroofFlow = field(default_factory=SunroofFlow)
@@ -170,6 +187,7 @@ class ControllerState:
     navigation: NavigationFlow = field(default_factory=NavigationFlow)
     high_beam: HighBeamFlow = field(default_factory=HighBeamFlow)
     fog_lights: FogLightFlow = field(default_factory=FogLightFlow)
+    defrost: DefrostFlow = field(default_factory=DefrostFlow)
     last_user_text: str = ""
 
 
@@ -213,6 +231,8 @@ class PolicyAwareController:
             return self._next_trunk_action(state, tool_index)
         if state.air_circulation.active:
             return self._next_air_circulation_action(state, tool_index)
+        if state.defrost.active:
+            return self._next_defrost_action(state, tool_index)
         if state.navigation.active:
             return self._next_navigation_action(state, tool_index)
         if state.high_beam.active:
@@ -324,6 +344,12 @@ class PolicyAwareController:
                 state.air_circulation.mode = clarified_mode
                 return
 
+        if state.defrost.active and state.defrost.defrost_window is None:
+            clarified_window = _extract_defrost_window(lowered)
+            if clarified_window is not None:
+                state.defrost.defrost_window = clarified_window
+                return
+
         navigation = state.navigation
         if navigation.active and navigation.route_choice_requested:
             route_preference = _extract_route_preference(lowered)
@@ -364,6 +390,12 @@ class PolicyAwareController:
             state.air_circulation = AirCirculationFlow(
                 active=True,
                 mode=_extract_air_circulation_mode(lowered),
+            )
+        elif _is_defrost_request(lowered):
+            state.defrost = DefrostFlow(
+                active=True,
+                on=not _is_light_off_request(lowered),
+                defrost_window=_extract_defrost_window(lowered),
             )
         elif _is_simple_navigation_request(text):
             destination = _extract_navigation_destination(text)
@@ -447,6 +479,16 @@ class PolicyAwareController:
                 ac_value = result.get("air_conditioning")
                 if isinstance(ac_value, bool):
                     state.window.ac_on = ac_value
+
+                state.defrost.climate_checked = True
+                fan_speed = _safe_int(result.get("fan_speed"), state.defrost.fan_speed)
+                if fan_speed is not None:
+                    state.defrost.fan_speed = fan_speed
+                airflow = result.get("fan_airflow_direction")
+                if isinstance(airflow, str):
+                    state.defrost.fan_airflow_direction = airflow
+                if isinstance(ac_value, bool):
+                    state.defrost.air_conditioning = ac_value
             elif name == "open_close_window" and isinstance(result, dict):
                 state.window.completed = True
                 state.window.target_percentage = _safe_int(
@@ -455,6 +497,11 @@ class PolicyAwareController:
                 window = result.get("window")
                 if isinstance(window, str):
                     state.window.window = window
+                    percentage = _safe_int(result.get("percentage"))
+                    if percentage is not None:
+                        _record_defrost_window_position(
+                            state.defrost, window, percentage
+                        )
             elif name == "set_ambient_lights" and isinstance(result, dict):
                 state.ambient_light.completed = True
                 color = result.get("lightcolor")
@@ -502,6 +549,44 @@ class PolicyAwareController:
                 on_value = result.get("on")
                 if isinstance(on_value, bool):
                     state.fog_lights.on = on_value
+            elif name == "get_vehicle_window_positions" and isinstance(result, dict):
+                state.defrost.windows_checked = True
+                state.defrost.window_driver_position = _safe_int(
+                    result.get("window_driver_position"),
+                    state.defrost.window_driver_position,
+                )
+                state.defrost.window_passenger_position = _safe_int(
+                    result.get("window_passenger_position"),
+                    state.defrost.window_passenger_position,
+                )
+                state.defrost.window_driver_rear_position = _safe_int(
+                    result.get("window_driver_rear_position"),
+                    state.defrost.window_driver_rear_position,
+                )
+                state.defrost.window_passenger_rear_position = _safe_int(
+                    result.get("window_passenger_rear_position"),
+                    state.defrost.window_passenger_rear_position,
+                )
+            elif name == "set_fan_speed" and isinstance(result, dict):
+                level = _safe_int(result.get("level"), state.defrost.fan_speed)
+                if level is not None:
+                    state.defrost.fan_speed = level
+            elif name == "set_fan_airflow_direction" and isinstance(result, dict):
+                direction = result.get("direction")
+                if isinstance(direction, str):
+                    state.defrost.fan_airflow_direction = direction
+            elif name == "set_air_conditioning" and isinstance(result, dict):
+                on_value = result.get("on")
+                if isinstance(on_value, bool):
+                    state.defrost.air_conditioning = on_value
+            elif name == "set_window_defrost" and isinstance(result, dict):
+                state.defrost.completed = True
+                on_value = result.get("on")
+                if isinstance(on_value, bool):
+                    state.defrost.on = on_value
+                defrost_window = result.get("defrost_window")
+                if defrost_window in {"ALL", "FRONT", "REAR"}:
+                    state.defrost.defrost_window = defrost_window
             elif name == "get_location_id_by_location_name":
                 if isinstance(result, dict) and isinstance(result.get("id"), str):
                     state.navigation.destination_id = result["id"]
@@ -991,6 +1076,125 @@ class PolicyAwareController:
             reason="fog_lights_on",
         )
 
+    def _next_defrost_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        defrost = state.defrost
+
+        if defrost.completed:
+            target = _friendly_defrost_window(defrost.defrost_window)
+            on = defrost.on
+            state.defrost = DefrostFlow()
+            return NextAction.respond(
+                f"Done, {target} defrost is on."
+                if on
+                else f"Done, {target} defrost is off.",
+                reason="defrost_done",
+            )
+
+        if not tool_index.has("set_window_defrost"):
+            return NextAction.respond(
+                "I can't change window defrost because that control is unavailable right now.",
+                reason="defrost_missing_tool",
+            )
+
+        if defrost.defrost_window is None:
+            return NextAction.respond(
+                "Which window defrost should I set: front, rear, or all?",
+                reason="defrost_user_disambiguation",
+            )
+
+        if not defrost.on or defrost.defrost_window == "REAR":
+            return NextAction.tool_call(
+                "set_window_defrost",
+                {"on": defrost.on, "defrost_window": defrost.defrost_window},
+                reason="defrost_set_simple",
+            )
+
+        if not defrost.climate_checked:
+            if not tool_index.has("get_climate_settings"):
+                return NextAction.respond(
+                    "I can't safely turn on front defrost because the climate settings check is unavailable right now.",
+                    reason="defrost_missing_climate_tool",
+                )
+            return NextAction.tool_call(
+                "get_climate_settings",
+                reason="defrost_climate_check",
+            )
+
+        needs_ac = defrost.air_conditioning is not True
+
+        if needs_ac and not defrost.windows_checked:
+            if not tool_index.has("get_vehicle_window_positions"):
+                return NextAction.respond(
+                    "I can't safely turn on front defrost because the window position check is unavailable right now.",
+                    reason="defrost_missing_window_positions_tool",
+                )
+            return NextAction.tool_call(
+                "get_vehicle_window_positions",
+                reason="defrost_window_position_check",
+            )
+
+        if needs_ac and _defrost_window_status_unknown(defrost):
+            return NextAction.respond(
+                "I can't safely turn on front defrost because I couldn't determine all window positions before enabling air conditioning.",
+                reason="defrost_unknown_window_positions",
+            )
+
+        if needs_ac and _any_defrost_window_open_over(defrost, 20):
+            if not tool_index.has("open_close_window"):
+                return NextAction.respond(
+                    "I can't safely turn on front defrost because open windows need to be closed first and the window control is unavailable.",
+                    reason="defrost_missing_window_control",
+                )
+            return NextAction.tool_call(
+                "open_close_window",
+                {"window": "ALL", "percentage": 0},
+                reason="defrost_close_windows_before_ac",
+            )
+
+        if (defrost.fan_speed or 0) < 2:
+            if not tool_index.has("set_fan_speed"):
+                return NextAction.respond(
+                    "I can't safely turn on front defrost because the fan speed control is unavailable right now.",
+                    reason="defrost_missing_fan_speed_tool",
+                )
+            return NextAction.tool_call(
+                "set_fan_speed",
+                {"level": 2},
+                reason="defrost_raise_fan_speed",
+            )
+
+        if not _airflow_includes_windshield(defrost.fan_airflow_direction):
+            if not tool_index.has("set_fan_airflow_direction"):
+                return NextAction.respond(
+                    "I can't safely turn on front defrost because the airflow direction control is unavailable right now.",
+                    reason="defrost_missing_airflow_tool",
+                )
+            return NextAction.tool_call(
+                "set_fan_airflow_direction",
+                {"direction": "WINDSHIELD"},
+                reason="defrost_set_windshield_airflow",
+            )
+
+        if needs_ac:
+            if not tool_index.has("set_air_conditioning"):
+                return NextAction.respond(
+                    "I can't safely turn on front defrost because the air conditioning control is unavailable right now.",
+                    reason="defrost_missing_ac_tool",
+                )
+            return NextAction.tool_call(
+                "set_air_conditioning",
+                {"on": True},
+                reason="defrost_enable_ac",
+            )
+
+        return NextAction.tool_call(
+            "set_window_defrost",
+            {"on": True, "defrost_window": defrost.defrost_window},
+            reason="defrost_set",
+        )
+
     def _next_navigation_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -1219,6 +1423,30 @@ def _is_fog_light_request(text: str) -> bool:
             "set",
             "need",
             "want",
+        )
+    )
+
+
+def _is_defrost_request(text: str) -> bool:
+    if "defrost" not in text:
+        return False
+    if any(phrase in text for phrase in ("match", "same as", "as much as")):
+        return False
+    if "passenger rear" in text or "driver rear" in text:
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "turn on",
+            "turn off",
+            "switch on",
+            "switch off",
+            "activate",
+            "deactivate",
+            "set",
+            "clear",
+            "fog",
+            "fogging",
         )
     )
 
@@ -1557,6 +1785,22 @@ def _extract_air_circulation_mode(
     return None
 
 
+def _extract_defrost_window(
+    text: str,
+) -> Literal["ALL", "FRONT", "REAR"] | None:
+    if "front" in text or "windshield" in text or "windscreen" in text:
+        return "FRONT"
+    if re.search(r"\brear(?: window)? defrost\b", text) or re.search(
+        r"\bdefrost(?: the)? rear\b", text
+    ):
+        return "REAR"
+    if re.search(r"\b(all|both) (?:window )?defrost\b", text) or re.search(
+        r"\bdefrost (?:all|both)\b", text
+    ):
+        return "ALL"
+    return None
+
+
 def _is_affirmative(text: str) -> bool:
     text = text.strip().lower()
     return bool(
@@ -1641,6 +1885,59 @@ def _extract_preferred_air_circulation_mode(
     if re.search(r"\bauto(?:matic)?\b", text):
         return "AUTO"
     return None
+
+
+def _record_defrost_window_position(
+    defrost: DefrostFlow, window: str, percentage: int
+) -> None:
+    if window == "ALL":
+        defrost.window_driver_position = percentage
+        defrost.window_passenger_position = percentage
+        defrost.window_driver_rear_position = percentage
+        defrost.window_passenger_rear_position = percentage
+    elif window == "DRIVER":
+        defrost.window_driver_position = percentage
+    elif window == "PASSENGER":
+        defrost.window_passenger_position = percentage
+    elif window in {"DRIVER_REAR", "RIGHT_REAR"}:
+        defrost.window_driver_rear_position = percentage
+    elif window in {"PASSENGER_REAR", "LEFT_REAR"}:
+        defrost.window_passenger_rear_position = percentage
+
+
+def _defrost_window_positions(defrost: DefrostFlow) -> tuple[int | None, ...]:
+    return (
+        defrost.window_driver_position,
+        defrost.window_passenger_position,
+        defrost.window_driver_rear_position,
+        defrost.window_passenger_rear_position,
+    )
+
+
+def _defrost_window_status_unknown(defrost: DefrostFlow) -> bool:
+    return any(value is None for value in _defrost_window_positions(defrost))
+
+
+def _any_defrost_window_open_over(defrost: DefrostFlow, threshold: int) -> bool:
+    return any(
+        value is not None and value > threshold
+        for value in _defrost_window_positions(defrost)
+    )
+
+
+def _airflow_includes_windshield(direction: str | None) -> bool:
+    return bool(direction and "WINDSHIELD" in direction)
+
+
+def _friendly_defrost_window(
+    defrost_window: Literal["ALL", "FRONT", "REAR"] | None,
+) -> str:
+    return {
+        "ALL": "all-window",
+        "FRONT": "front-window",
+        "REAR": "rear-window",
+        None: "window",
+    }[defrost_window]
 
 
 def friendly_window_name(window: str) -> str:
