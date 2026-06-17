@@ -112,6 +112,11 @@ cp .env.example .env
 `third_party/car-bench/`. That checkout is ignored by git and treated as a local
 dependency for evaluator runs.
 
+Before changing benchmark-facing code, read
+[`docs/competition-modification-boundaries.md`](docs/competition-modification-boundaries.md).
+It defines which directories are participant-owned and which official evaluator
+dependencies must remain unmodified.
+
 Set at least the evaluator key in `.env`:
 
 ```bash
@@ -464,6 +469,8 @@ scenarios/
   track_2_agent_under_test_cerebras_planner/
 
 docs/
+  competition-modification-boundaries.md
+                                      participant vs official-code boundaries
   development-guide.md                detailed A2A turn contract
   agent-under-test-harnessing.md      allowed harness boundaries
   cerebras-harness-patterns.md        Track 2 model/harness patterns
@@ -475,16 +482,18 @@ docs/
 
 Use this reading path when building your own agent:
 
-1. **Pick a starter**
+1. **Confirm modification boundaries**
+   - [`docs/competition-modification-boundaries.md`](docs/competition-modification-boundaries.md)
+2. **Pick a starter**
    - Track 1: [`src/track_1_agent_under_test/README.md`](src/track_1_agent_under_test/README.md)
    - Track 2 direct Cerebras: [`src/track_2_agent_under_test_cerebras/README.md`](src/track_2_agent_under_test_cerebras/README.md)
    - Track 2 planner/executor: [`src/track_2_agent_under_test_cerebras_planner/README.md`](src/track_2_agent_under_test_cerebras_planner/README.md)
-2. **Understand the turn contract**
+3. **Understand the turn contract**
    - [`docs/development-guide.md`](docs/development-guide.md)
-3. **Design a more sophisticated harness**
+4. **Design a more sophisticated harness**
    - [`docs/agent-under-test-harnessing.md`](docs/agent-under-test-harnessing.md)
    - [`docs/cerebras-harness-patterns.md`](docs/cerebras-harness-patterns.md)
-4. **Protocol background**
+5. **Protocol background**
    - [`docs/a2a-introduction.md`](docs/a2a-introduction.md)
 
 Rules of thumb:
