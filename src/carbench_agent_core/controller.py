@@ -114,6 +114,21 @@ class AirCirculationFlow:
 
 
 @dataclass
+class NavigationFlow:
+    active: bool = False
+    mode: Literal["set_new", "replace_final_destination"] | None = None
+    destination_name: str | None = None
+    destination_id: str | None = None
+    route_start_id: str | None = None
+    route_preference: Literal["fastest", "shortest"] | None = None
+    routes_checked: bool = False
+    routes: list[dict[str, Any]] = field(default_factory=list)
+    route_choice_requested: bool = False
+    completed: bool = False
+    failure_message: str | None = None
+
+
+@dataclass
 class ControllerState:
     runtime: RuntimeContext = field(default_factory=RuntimeContext)
     sunroof: SunroofFlow = field(default_factory=SunroofFlow)
@@ -121,6 +136,7 @@ class ControllerState:
     ambient_light: AmbientLightFlow = field(default_factory=AmbientLightFlow)
     trunk: TrunkFlow = field(default_factory=TrunkFlow)
     air_circulation: AirCirculationFlow = field(default_factory=AirCirculationFlow)
+    navigation: NavigationFlow = field(default_factory=NavigationFlow)
     last_user_text: str = ""
 
 
@@ -164,6 +180,8 @@ class PolicyAwareController:
             return self._next_trunk_action(state, tool_index)
         if state.air_circulation.active:
             return self._next_air_circulation_action(state, tool_index)
+        if state.navigation.active:
+            return self._next_navigation_action(state, tool_index)
 
         return None
 
@@ -237,6 +255,20 @@ class PolicyAwareController:
                 state.air_circulation.mode = clarified_mode
                 return
 
+        navigation = state.navigation
+        if navigation.active and navigation.route_choice_requested:
+            route_preference = _extract_route_preference(lowered)
+            if route_preference is not None:
+                navigation.route_preference = route_preference
+                navigation.route_choice_requested = False
+                return
+            if _is_affirmative(lowered) and _route_choice_is_unambiguous(
+                navigation.routes
+            ):
+                navigation.route_preference = "fastest"
+                navigation.route_choice_requested = False
+                return
+
         if _is_sunroof_open_request(lowered):
             state.sunroof = SunroofFlow(
                 active=True,
@@ -264,6 +296,19 @@ class PolicyAwareController:
                 active=True,
                 mode=_extract_air_circulation_mode(lowered),
             )
+        elif _is_simple_navigation_request(text):
+            destination = _extract_navigation_destination(text)
+            if destination is not None:
+                state.navigation = NavigationFlow(
+                    active=True,
+                    mode=(
+                        "replace_final_destination"
+                        if _is_replace_destination_request(lowered)
+                        else "set_new"
+                    ),
+                    destination_name=destination,
+                    route_preference=_extract_route_preference(lowered),
+                )
 
     def _observe_tool_results(
         self, state: ControllerState, tool_results: list[dict[str, Any]]
@@ -346,6 +391,34 @@ class PolicyAwareController:
                 mode = result.get("mode")
                 if mode in {"FRESH_AIR", "RECIRCULATION", "AUTO"}:
                     state.air_circulation.mode = mode
+            elif name == "get_location_id_by_location_name":
+                if isinstance(result, dict) and isinstance(result.get("id"), str):
+                    state.navigation.destination_id = result["id"]
+                elif state.navigation.active:
+                    destination = state.navigation.destination_name or "that destination"
+                    state.navigation.failure_message = (
+                        f"I couldn't find a location ID for {destination}."
+                    )
+            elif name == "get_routes_from_start_to_destination":
+                if isinstance(result, dict) and isinstance(result.get("routes"), list):
+                    state.navigation.routes_checked = True
+                    state.navigation.routes = [
+                        route for route in result["routes"] if isinstance(route, dict)
+                    ]
+                    if not state.navigation.routes:
+                        state.navigation.failure_message = (
+                            "I couldn't find a route to that destination."
+                        )
+                elif state.navigation.active:
+                    state.navigation.routes_checked = True
+                    state.navigation.failure_message = (
+                        "I couldn't find a route to that destination."
+                    )
+            elif name in {
+                "set_new_navigation",
+                "navigation_replace_final_destination",
+            } and isinstance(result, dict):
+                state.navigation.completed = True
 
     def _next_sunroof_action(
         self, state: ControllerState, tool_index: ToolIndex
@@ -630,6 +703,107 @@ class PolicyAwareController:
             reason="air_circulation_set",
         )
 
+    def _next_navigation_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        navigation = state.navigation
+
+        if navigation.completed:
+            return NextAction.respond(
+                "Done, the navigation is updated.",
+                reason="navigation_done",
+            )
+
+        if navigation.failure_message:
+            return NextAction.respond(
+                navigation.failure_message,
+                reason="navigation_failed",
+            )
+
+        if navigation.destination_id is None:
+            if not tool_index.has("get_location_id_by_location_name"):
+                return NextAction.respond(
+                    "I can't look up that destination because location search is unavailable right now.",
+                    reason="navigation_missing_location_tool",
+                )
+            if not navigation.destination_name:
+                return NextAction.respond(
+                    "Which destination should I use?",
+                    reason="navigation_missing_destination",
+                )
+            return NextAction.tool_call(
+                "get_location_id_by_location_name",
+                {"location": navigation.destination_name},
+                reason="navigation_lookup_destination",
+            )
+
+        if navigation.route_start_id is None:
+            navigation.route_start_id = _navigation_route_start_id(state, navigation)
+            if navigation.route_start_id is None:
+                return NextAction.respond(
+                    "I need the current location before I can find a route.",
+                    reason="navigation_missing_start",
+                )
+
+        if not navigation.routes_checked:
+            if not tool_index.has("get_routes_from_start_to_destination"):
+                return NextAction.respond(
+                    "I can't find a route because route search is unavailable right now.",
+                    reason="navigation_missing_route_tool",
+                )
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": navigation.route_start_id,
+                    "destination_id": navigation.destination_id,
+                },
+                reason="navigation_route_lookup",
+            )
+
+        selected_route = _select_route(navigation.routes, navigation.route_preference)
+        if selected_route is None:
+            if len(navigation.routes) == 1:
+                selected_route = navigation.routes[0]
+            else:
+                navigation.route_choice_requested = True
+                return NextAction.respond(
+                    _format_route_choice_prompt(navigation.routes),
+                    reason="navigation_route_disambiguation",
+                )
+
+        route_id = selected_route.get("route_id")
+        if not isinstance(route_id, str) or not route_id:
+            return NextAction.respond(
+                "I can't safely set that route because the route ID is missing.",
+                reason="navigation_missing_route_id",
+            )
+
+        if navigation.mode == "replace_final_destination":
+            if not tool_index.has("navigation_replace_final_destination"):
+                return NextAction.respond(
+                    "I can't replace the destination because that navigation edit control is unavailable right now.",
+                    reason="navigation_missing_replace_tool",
+                )
+            return NextAction.tool_call(
+                "navigation_replace_final_destination",
+                {
+                    "new_destination_id": navigation.destination_id,
+                    "route_id_leading_to_new_destination": route_id,
+                },
+                reason="navigation_replace_destination",
+            )
+
+        if not tool_index.has("set_new_navigation"):
+            return NextAction.respond(
+                "I can't start navigation because that control is unavailable right now.",
+                reason="navigation_missing_set_tool",
+            )
+        return NextAction.tool_call(
+            "set_new_navigation",
+            {"route_ids": [route_id]},
+            reason="navigation_set_new",
+        )
+
 
 def _extract_json_after_label(text: str, label: str) -> dict[str, Any] | None:
     label_index = text.find(label)
@@ -742,6 +916,201 @@ def _is_air_circulation_request(text: str) -> bool:
             "do not like",
         )
     )
+
+
+def _is_simple_navigation_request(text: str) -> bool:
+    lowered = text.lower()
+    if _is_complex_navigation_request(lowered):
+        return False
+    if _extract_navigation_destination(text) is None:
+        return False
+    return bool(
+        re.search(
+            r"\b(navigate|navigation|directions?|route|drive|go|travel)\b",
+            lowered,
+        )
+        or _is_replace_destination_request(lowered)
+    )
+
+
+def _is_complex_navigation_request(text: str) -> bool:
+    complex_markers = (
+        "charging station",
+        "charging stop",
+        "charge",
+        "restaurant",
+        "fast food",
+        "parking",
+        "airport",
+        "toilet",
+        "supermarket",
+        "bakery",
+        "point of interest",
+        "poi",
+        "weather",
+        "rain",
+        "calendar",
+        "multi-stop",
+        "multistop",
+        "waypoint",
+        "along the route",
+        "stop in",
+        "stop at",
+        "stops in",
+        "stops at",
+    )
+    return any(marker in text for marker in complex_markers)
+
+
+def _is_replace_destination_request(text: str) -> bool:
+    return bool(
+        (
+            re.search(r"\b(change|replace|switch|update)\b", text)
+            and re.search(r"\b(destination|navigation|route)\b", text)
+        )
+        or "rather go to" in text
+        or "instead of" in text
+    )
+
+
+def _extract_navigation_destination(text: str) -> str | None:
+    patterns = (
+        r"\b(?i:change|replace|switch|update)\b[^.?!]{0,100}?\b(?i:destination)\b[^.?!]{0,80}?\bto\s+([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})",
+        r"\b(?i:navigate|drive|go|travel|route)\b[^.?!]{0,80}?\bto\s+([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})",
+        r"\b(?i:directions?)\b[^.?!]{0,40}?\bto\s+([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})",
+        r"\b(?i:rather go to)\s+([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            destination = _clean_location_query(matches[-1])
+            if destination:
+                return destination
+
+    return None
+
+
+def _clean_location_query(value: str) -> str | None:
+    value = value.split(",", 1)[0]
+    value = re.split(
+        r"\b(?:instead|because|with|without|if|when|that|which|where|for|from|via|then|first|next|now|rather)\b",
+        value,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    value = re.sub(
+        r"\b(?:city center|city centre|city|centre)\b",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = " ".join(value.strip(" .?!;:-").split())
+    value = re.sub(r"\s+\b(?:and|or)\b$", "", value, flags=re.IGNORECASE)
+    if not value:
+        return None
+    if value.lower() in {"the", "there", "home", "work"}:
+        return None
+    return value
+
+
+def _extract_route_preference(
+    text: str,
+) -> Literal["fastest", "shortest"] | None:
+    if "fastest" in text or "quickest" in text:
+        return "fastest"
+    if "shortest" in text:
+        return "shortest"
+    return None
+
+
+def _navigation_route_start_id(
+    state: ControllerState,
+    navigation: NavigationFlow,
+) -> str | None:
+    if navigation.route_start_id:
+        return navigation.route_start_id
+    return state.runtime.location_id
+
+
+def _select_route(
+    routes: list[dict[str, Any]],
+    preference: Literal["fastest", "shortest"] | None,
+) -> dict[str, Any] | None:
+    if not routes:
+        return None
+    if preference is None:
+        return routes[0] if len(routes) == 1 else None
+    for route in routes:
+        aliases = route.get("alias") or []
+        if isinstance(aliases, list) and preference in {
+            str(alias).lower() for alias in aliases
+        }:
+            return route
+    return routes[0] if len(routes) == 1 else None
+
+
+def _route_choice_is_unambiguous(routes: list[dict[str, Any]]) -> bool:
+    if len(routes) == 1:
+        return True
+    fastest = _select_route(routes, "fastest")
+    shortest = _select_route(routes, "shortest")
+    return (
+        fastest is not None
+        and shortest is not None
+        and fastest.get("route_id") == shortest.get("route_id")
+    )
+
+
+def _format_route_choice_prompt(routes: list[dict[str, Any]]) -> str:
+    fastest = _select_route(routes, "fastest")
+    shortest = _select_route(routes, "shortest")
+    if (
+        fastest is not None
+        and shortest is not None
+        and fastest.get("route_id") == shortest.get("route_id")
+    ):
+        return (
+            f"I found one best route: {_route_summary(fastest)}. "
+            "Do you want me to start it?"
+        )
+    if fastest is not None and shortest is not None:
+        extra_count = max(len(routes) - len({id(fastest), id(shortest)}), 0)
+        extra_note = (
+            f" There are {extra_count} other alternatives."
+            if extra_count
+            else ""
+        )
+        return (
+            f"I found routes. Fastest: {_route_summary(fastest)}. "
+            f"Shortest: {_route_summary(shortest)}.{extra_note} "
+            "Do you want the fastest or shortest route?"
+        )
+    return "I found multiple routes. Do you want the fastest or shortest route?"
+
+
+def _route_summary(route: dict[str, Any]) -> str:
+    distance = route.get("distance_km")
+    hours = _safe_int(route.get("duration_hours"), 0) or 0
+    minutes = _safe_int(route.get("duration_minutes"), 0) or 0
+    via = route.get("name_via")
+    parts = []
+    if isinstance(via, str) and via:
+        parts.append(f"via {via}")
+    if isinstance(distance, (int, float)):
+        parts.append(f"{distance:g} km")
+    if hours or minutes:
+        parts.append(_format_duration(hours, minutes))
+    if route.get("includes_toll") is True:
+        parts.append("includes toll roads")
+    return ", ".join(parts) if parts else "route details are available"
+
+
+def _format_duration(hours: int, minutes: int) -> str:
+    if hours and minutes:
+        return f"{hours} h {minutes} min"
+    if hours:
+        return f"{hours} h"
+    return f"{minutes} min"
 
 
 def _is_close_request(text: str) -> bool:
