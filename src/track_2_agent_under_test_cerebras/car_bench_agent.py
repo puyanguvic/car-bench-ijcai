@@ -16,6 +16,7 @@ from a2a.types import Role
 from google.protobuf.json_format import MessageToDict
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from carbench_agent_core import NextAction, PolicyAwareController, ToolIndex
 from logging_utils import configure_logger
 from tool_call_types import ToolCall, ToolCallsData
 from turn_metrics import (
@@ -59,6 +60,89 @@ else:
 logger = configure_logger(role="agent_under_test", context="-")
 
 
+def _payload_from_next_action(action: NextAction) -> dict[str, Any]:
+    if action.action == "respond":
+        return {"action": "respond", "content": action.content, "tool_calls": []}
+    return {
+        "action": "tool_calls",
+        "content": "",
+        "tool_calls": [
+            {
+                "tool_name": tool_call["tool_name"],
+                "arguments": tool_call.get("arguments") or {},
+            }
+            for tool_call in action.tool_calls
+        ],
+    }
+
+
+def _validated_next_action(
+    next_action: dict[str, Any],
+    *,
+    tool_index: ToolIndex,
+) -> dict[str, Any]:
+    if next_action.get("action") == "respond":
+        return {
+            "action": "respond",
+            "content": _clean_user_content(next_action.get("content") or ""),
+            "tool_calls": [],
+        }
+
+    if next_action.get("action") != "tool_calls":
+        return {
+            "action": "respond",
+            "content": "I can't safely continue because the selected action was malformed.",
+            "tool_calls": [],
+        }
+
+    tool_calls = next_action.get("tool_calls")
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return {
+            "action": "respond",
+            "content": "I can't safely continue because the tool call was malformed.",
+            "tool_calls": [],
+        }
+
+    validated_calls = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            return {
+                "action": "respond",
+                "content": "I can't safely continue because the tool call was malformed.",
+                "tool_calls": [],
+            }
+        name = tool_call.get("tool_name")
+        arguments = tool_call.get("arguments") or {}
+        if not isinstance(name, str) or not name:
+            return {
+                "action": "respond",
+                "content": "I can't safely use that tool because the tool name was malformed.",
+                "tool_calls": [],
+            }
+        if not isinstance(arguments, dict):
+            return {
+                "action": "respond",
+                "content": f"I can't safely use {name} because the tool arguments were malformed.",
+                "tool_calls": [],
+            }
+
+        validation_error = tool_index.validate_call(name, arguments)
+        if validation_error:
+            return {
+                "action": "respond",
+                "content": validation_error,
+                "tool_calls": [],
+            }
+        validated_calls.append({"tool_name": name, "arguments": arguments})
+
+    return {"action": "tool_calls", "content": "", "tool_calls": validated_calls}
+
+
+def _clean_user_content(content: str) -> str:
+    content = content.replace("\u200b", "").replace("\xa0", " ")
+    return "\n".join(line.strip() for line in content.splitlines() if line.strip())
+
+
 @dataclass
 class AgentInferenceResult:
     """Internal result for one benchmark-visible assistant step."""
@@ -98,6 +182,7 @@ class CARBenchAgentExecutor(AgentExecutor):
         self.ctx_id_to_messages: dict[str, list[dict[str, Any]]] = {}
         self.ctx_id_to_tools: dict[str, list[dict[str, Any]]] = {}
         self.ctx_id_to_turn_metrics: dict[str, dict[str, Any]] = {}
+        self.policy_controller = PolicyAwareController()
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         inbound_message = context.message
@@ -143,12 +228,50 @@ class CARBenchAgentExecutor(AgentExecutor):
                 incoming_tool_results=incoming_tool_results,
             )
 
-            inference_result = self._call_model_with_retries(
+            tool_index = ToolIndex(tools)
+            controlled_action = self.policy_controller.decide(
                 context_id=context.context_id,
                 messages=messages,
                 tools=tools,
-                ctx_logger=ctx_logger,
+                latest_user_text=(
+                    user_message_text if not incoming_tool_results else None
+                ),
+                latest_tool_results=incoming_tool_results,
             )
+
+            if controlled_action is not None:
+                inference_result = AgentInferenceResult(
+                    next_action=_validated_next_action(
+                        _payload_from_next_action(controlled_action),
+                        tool_index=tool_index,
+                    ),
+                    elapsed_ms=0.0,
+                    token_usage=None,
+                    cost=0.0,
+                    internal_calls=0,
+                    quota_wait_ms=0.0,
+                )
+                ctx_logger.info(
+                    "Policy controller selected action",
+                    action=controlled_action.action,
+                    reason=controlled_action.reason,
+                    num_tool_calls=len(controlled_action.tool_calls),
+                )
+                self._on_policy_controlled_action(
+                    context.context_id,
+                    controlled_action,
+                )
+            else:
+                inference_result = self._call_model_with_retries(
+                    context_id=context.context_id,
+                    messages=messages,
+                    tools=tools,
+                    ctx_logger=ctx_logger,
+                )
+                inference_result.next_action = _validated_next_action(
+                    inference_result.next_action,
+                    tool_index=tool_index,
+                )
 
             parts, assistant_message_for_history = self._build_a2a_response_parts(
                 inference_result.next_action
@@ -198,6 +321,7 @@ class CARBenchAgentExecutor(AgentExecutor):
         self.ctx_id_to_messages.pop(context.context_id, None)
         self.ctx_id_to_tools.pop(context.context_id, None)
         self.ctx_id_to_turn_metrics.pop(context.context_id, None)
+        self.policy_controller.reset(context.context_id)
 
     def _call_model_with_retries(
         self,
@@ -323,6 +447,14 @@ class CARBenchAgentExecutor(AgentExecutor):
             f"Cerebras did not produce a valid next-action JSON object: {last_error}"
         )
 
+    def _on_policy_controlled_action(
+        self,
+        context_id: str,
+        controlled_action: NextAction,
+    ) -> None:
+        """Hook for subclasses that keep model-side per-context state."""
+        return None
+
     def _parse_inbound_parts(
         self,
         inbound_message,
@@ -442,11 +574,13 @@ class CARBenchAgentExecutor(AgentExecutor):
                 MODEL: self.model,
                 THINKING_TOKENS: 0,
                 NUM_LLM_CALLS: 0,
+                NUM_PASSES: 1,
                 QUOTA_WAIT_TIME_MS: 0.0,
                 "_total_llm_time_ms": 0.0,
             },
         )
-        metrics[NUM_LLM_CALLS] += max(internal_calls, 1)
+        internal_calls = max(internal_calls, 0)
+        metrics[NUM_LLM_CALLS] += internal_calls
         if token_usage is not None:
             metrics[PROMPT_TOKENS] += token_usage.input_tokens
             metrics[COMPLETION_TOKENS] += token_usage.output_tokens
@@ -455,11 +589,12 @@ class CARBenchAgentExecutor(AgentExecutor):
         metrics["_total_llm_time_ms"] += elapsed_ms
         metrics[QUOTA_WAIT_TIME_MS] += quota_wait_ms
         num_calls = metrics[NUM_LLM_CALLS]
-        metrics[AVG_LLM_CALL_TIME_MS] = round(
-            metrics["_total_llm_time_ms"] / num_calls,
-            1,
+        metrics[AVG_LLM_CALL_TIME_MS] = (
+            round(metrics["_total_llm_time_ms"] / num_calls, 1)
+            if num_calls
+            else 0.0
         )
-        metrics[NUM_PASSES] = max(internal_calls, 1)
+        metrics[NUM_PASSES] = max(metrics.get(NUM_PASSES, 1), max(internal_calls, 1))
 
     @staticmethod
     def _public_turn_metrics(metrics: dict[str, Any]) -> dict[str, Any]:

@@ -24,6 +24,7 @@ from car_bench.envs.tool_execution_error_evaluator import (
 )
 from car_bench.types import Task, TaskType
 from track_2_agent_under_test_cerebras.car_bench_agent import (
+    AgentInferenceResult,
     CARBenchAgentExecutor as CerebrasCARBenchAgentExecutor,
 )
 from track_2_agent_under_test_cerebras import cerebras_client as cerebras_client_module
@@ -127,6 +128,43 @@ class FakeLogger:
 
     def debug(self, event: str, **kwargs) -> None:
         self.entries.append(("debug", event, kwargs))
+
+
+class FakeRequestContext:
+    def __init__(self, message, context_id: str = "ctx-test") -> None:
+        self.message = message
+        self.context_id = context_id
+
+    def get_user_input(self) -> str:
+        return ""
+
+
+class FakeEventQueue:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def enqueue_event(self, event) -> None:
+        self.events.append(event)
+
+
+def fake_tool(
+    name: str,
+    *,
+    properties: dict | None = None,
+    required: list[str] | None = None,
+) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "",
+            "parameters": {
+                "type": "object",
+                "properties": properties or {},
+                "required": required or [],
+            },
+        },
+    }
 
 
 def fake_completion(
@@ -1008,6 +1046,149 @@ class A2AResponseContractTest(unittest.TestCase):
             "open_close_sunshade",
         )
 
+    def test_cerebras_policy_controller_runs_before_model_call(self) -> None:
+        class NoModelExecutor(CerebrasCARBenchAgentExecutor):
+            def __init__(self) -> None:
+                super().__init__(model="gpt-oss-120b")
+                self.model_calls = 0
+
+            def _call_model_with_retries(self, **kwargs):
+                self.model_calls += 1
+                raise AssertionError("model should not be called")
+
+        message = create_message_with_parts(
+            parts=[
+                new_text_part(
+                    'System: CURRENT_LOCATION = {"id": "loc_1"}\n'
+                    'DATETIME = {"month": 6, "day": 17, "hour": 9, "minute": 0}'
+                    "\n\nUser: Open the sunroof halfway."
+                ),
+                new_data_part(
+                    {
+                        "tools": [
+                            fake_tool("get_sunroof_and_sunshade_position"),
+                        ]
+                    }
+                ),
+            ],
+            context_id="ctx-policy",
+        )
+        executor = NoModelExecutor()
+        event_queue = FakeEventQueue()
+
+        asyncio.run(
+            executor.execute(
+                FakeRequestContext(message, context_id="ctx-policy"),
+                event_queue,
+            )
+        )
+
+        self.assertEqual(executor.model_calls, 0)
+        self.assertEqual(len(event_queue.events), 1)
+        response = event_queue.events[0]
+        self.assertEqual(response.parts[0].WhichOneof("content"), "data")
+        data = MessageToDict(response.parts[0].data)
+        self.assertEqual(
+            data["tool_calls"][0]["tool_name"],
+            "get_sunroof_and_sunshade_position",
+        )
+        self.assertEqual(
+            executor.ctx_id_to_turn_metrics["ctx-policy"][NUM_LLM_CALLS],
+            0,
+        )
+
+    def test_cerebras_planner_clears_private_plan_when_policy_controls_turn(self) -> None:
+        class NoModelPlanner(CerebrasPlannerExecutor):
+            def __init__(self) -> None:
+                super().__init__(
+                    planner_model="gpt-oss-120b",
+                    executor_model="gpt-oss-120b",
+                )
+                self.model_calls = 0
+
+            def _call_model_with_retries(self, **kwargs):
+                self.model_calls += 1
+                raise AssertionError("model should not be called")
+
+        message = create_message_with_parts(
+            parts=[
+                new_text_part(
+                    'System: CURRENT_LOCATION = {"id": "loc_1"}\n'
+                    'DATETIME = {"month": 6, "day": 17, "hour": 9, "minute": 0}'
+                    "\n\nUser: Open the sunroof halfway."
+                ),
+                new_data_part(
+                    {
+                        "tools": [
+                            fake_tool("get_sunroof_and_sunshade_position"),
+                        ]
+                    }
+                ),
+            ],
+            context_id="ctx-policy-planner",
+        )
+        executor = NoModelPlanner()
+        executor._active_private_plans_by_context["ctx-policy-planner"] = {
+            "planning_tool": {"plan_id": "stale"}
+        }
+        event_queue = FakeEventQueue()
+
+        asyncio.run(
+            executor.execute(
+                FakeRequestContext(message, context_id="ctx-policy-planner"),
+                event_queue,
+            )
+        )
+
+        self.assertEqual(executor.model_calls, 0)
+        self.assertNotIn(
+            "ctx-policy-planner",
+            executor._active_private_plans_by_context,
+        )
+
+    def test_cerebras_model_tool_call_is_validated_against_available_tools(self) -> None:
+        class InvalidToolCallExecutor(CerebrasCARBenchAgentExecutor):
+            def __init__(self) -> None:
+                super().__init__(model="gpt-oss-120b")
+                self.model_calls = 0
+
+            def _call_model_with_retries(self, **kwargs):
+                self.model_calls += 1
+                return AgentInferenceResult(
+                    next_action={
+                        "action": "tool_calls",
+                        "content": "",
+                        "tool_calls": [
+                            {"tool_name": "missing_tool", "arguments": {}}
+                        ],
+                    },
+                    elapsed_ms=25.0,
+                    internal_calls=1,
+                )
+
+        message = create_message_with_parts(
+            parts=[new_text_part("Please do the unavailable action.")],
+            context_id="ctx-invalid-tool",
+        )
+        executor = InvalidToolCallExecutor()
+        event_queue = FakeEventQueue()
+
+        asyncio.run(
+            executor.execute(
+                FakeRequestContext(message, context_id="ctx-invalid-tool"),
+                event_queue,
+            )
+        )
+
+        self.assertEqual(executor.model_calls, 1)
+        self.assertEqual(len(event_queue.events), 1)
+        response = event_queue.events[0]
+        self.assertEqual(response.parts[0].WhichOneof("content"), "text")
+        self.assertEqual(
+            response.parts[0].text,
+            "I can't do that because the missing_tool capability is not available right now.",
+        )
+
     def test_cerebras_turn_metrics_are_public_metadata_shape(self) -> None:
         executor = CerebrasCARBenchAgentExecutor(model="gpt-oss-120b")
 
@@ -1037,6 +1218,25 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(metrics[NUM_PASSES], 1)
         self.assertEqual(metrics[QUOTA_WAIT_TIME_MS], 0.0)
         self.assertNotIn("_total_llm_time_ms", metrics)
+
+    def test_cerebras_turn_metrics_allow_zero_call_policy_turn(self) -> None:
+        executor = CerebrasCARBenchAgentExecutor(model="gpt-oss-120b")
+
+        executor._record_turn_metrics(
+            "ctx",
+            0.0,
+            internal_calls=0,
+        )
+        metrics = executor._public_turn_metrics(
+            executor.ctx_id_to_turn_metrics.pop("ctx")
+        )
+
+        self.assertEqual(metrics[PROMPT_TOKENS], 0)
+        self.assertEqual(metrics[COMPLETION_TOKENS], 0)
+        self.assertEqual(metrics[THINKING_TOKENS], 0)
+        self.assertEqual(metrics[NUM_LLM_CALLS], 0)
+        self.assertEqual(metrics[AVG_LLM_CALL_TIME_MS], 0.0)
+        self.assertEqual(metrics[NUM_PASSES], 1)
 
     def test_cerebras_planner_executor_metrics_report_internal_passes(self) -> None:
         executor = CerebrasPlannerExecutor(

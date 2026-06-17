@@ -100,6 +100,13 @@ class PlannerExecutorCARBenchAgentExecutor(CerebrasNextActionExecutor):
         self._active_private_plans_by_context.pop(context.context_id, None)
         await super().cancel(context, event_queue)
 
+    def _on_policy_controlled_action(
+        self,
+        context_id: str,
+        controlled_action,
+    ) -> None:
+        self._active_private_plans_by_context.pop(context_id, None)
+
     def _call_model_with_retries(
         self,
         *,
@@ -370,7 +377,7 @@ class PlannerExecutorCARBenchAgentExecutor(CerebrasNextActionExecutor):
             internal_calls
             if internal_calls is not None
             else self._last_internal_call_count,
-            1,
+            0,
         )
         metrics = self.ctx_id_to_turn_metrics.setdefault(
             context_id,
@@ -381,6 +388,7 @@ class PlannerExecutorCARBenchAgentExecutor(CerebrasNextActionExecutor):
                 MODEL: f"{self.planner_model}->{self.executor_model}",
                 THINKING_TOKENS: 0,
                 NUM_LLM_CALLS: 0,
+                NUM_PASSES: 1,
                 QUOTA_WAIT_TIME_MS: 0.0,
                 "_total_llm_time_ms": 0.0,
             },
@@ -393,11 +401,12 @@ class PlannerExecutorCARBenchAgentExecutor(CerebrasNextActionExecutor):
         metrics[COST] += cost
         metrics["_total_llm_time_ms"] += elapsed_ms
         metrics[QUOTA_WAIT_TIME_MS] += quota_wait_ms
-        metrics[AVG_LLM_CALL_TIME_MS] = round(
-            metrics["_total_llm_time_ms"] / metrics[NUM_LLM_CALLS],
-            1,
+        metrics[AVG_LLM_CALL_TIME_MS] = (
+            round(metrics["_total_llm_time_ms"] / metrics[NUM_LLM_CALLS], 1)
+            if metrics[NUM_LLM_CALLS]
+            else 0.0
         )
-        metrics[NUM_PASSES] = internal_calls
+        metrics[NUM_PASSES] = max(metrics.get(NUM_PASSES, 1), max(internal_calls, 1))
 
 
 def build_planner_prompt(
