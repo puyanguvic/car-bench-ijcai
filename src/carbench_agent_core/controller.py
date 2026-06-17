@@ -96,10 +96,23 @@ class WindowFlow:
 
 
 @dataclass
+class WindowMatchFlow:
+    active: bool = False
+    windows_checked: bool = False
+    window_driver_position: int | None = None
+    window_passenger_position: int | None = None
+    window_driver_rear_position: int | None = None
+    window_passenger_rear_position: int | None = None
+    completed: bool = False
+
+
+@dataclass
 class AmbientLightFlow:
     active: bool = False
     target_color: str | None = None
     on: bool = True
+    match_car_color: bool = False
+    car_color_checked: bool = False
     preferences_checked: bool = False
     completed: bool = False
 
@@ -165,6 +178,15 @@ class ReadingLightFlow:
     active: bool = False
     position: str | None = None
     on: bool = True
+    completed: bool = False
+
+
+@dataclass
+class ReadingLightOccupancyFlow:
+    active: bool = False
+    seats_checked: bool = False
+    seats_occupied: dict[str, bool] = field(default_factory=dict)
+    pending_actions: list[tuple[str, bool]] = field(default_factory=list)
     completed: bool = False
 
 
@@ -236,6 +258,7 @@ class ControllerState:
     sunroof: SunroofFlow = field(default_factory=SunroofFlow)
     sunshade: SunshadeFlow = field(default_factory=SunshadeFlow)
     window: WindowFlow = field(default_factory=WindowFlow)
+    window_match: WindowMatchFlow = field(default_factory=WindowMatchFlow)
     ambient_light: AmbientLightFlow = field(default_factory=AmbientLightFlow)
     trunk: TrunkFlow = field(default_factory=TrunkFlow)
     air_circulation: AirCirculationFlow = field(default_factory=AirCirculationFlow)
@@ -246,6 +269,9 @@ class ControllerState:
         default_factory=SteeringWheelHeatingFlow
     )
     reading_light: ReadingLightFlow = field(default_factory=ReadingLightFlow)
+    reading_light_occupancy: ReadingLightOccupancyFlow = field(
+        default_factory=ReadingLightOccupancyFlow
+    )
     navigation: NavigationFlow = field(default_factory=NavigationFlow)
     high_beam: HighBeamFlow = field(default_factory=HighBeamFlow)
     fog_lights: FogLightFlow = field(default_factory=FogLightFlow)
@@ -287,6 +313,8 @@ class PolicyAwareController:
             return self._next_sunroof_action(state, tool_index)
         if state.sunshade.active:
             return self._next_sunshade_action(state, tool_index)
+        if state.window_match.active:
+            return self._next_window_match_action(state, tool_index)
         if state.window.active:
             return self._next_window_action(state, tool_index)
         if state.ambient_light.active:
@@ -303,6 +331,8 @@ class PolicyAwareController:
             return self._next_fan_speed_action(state, tool_index)
         if state.steering_wheel_heating.active:
             return self._next_steering_wheel_heating_action(state, tool_index)
+        if state.reading_light_occupancy.active:
+            return self._next_reading_light_occupancy_action(state, tool_index)
         if state.reading_light.active:
             return self._next_reading_light_action(state, tool_index)
         if state.defrost.active:
@@ -413,6 +443,9 @@ class PolicyAwareController:
                 return
 
         if state.ambient_light.active and state.ambient_light.target_color is None:
+            if _is_ambient_light_match_car_color_request(lowered):
+                state.ambient_light.match_car_color = True
+                return
             clarified_color = _extract_ambient_color(lowered)
             if clarified_color is not None:
                 state.ambient_light.target_color = clarified_color
@@ -498,6 +531,8 @@ class PolicyAwareController:
                 active=True,
                 target_percentage=_extract_sunshade_percentage(lowered),
             )
+        elif _is_window_match_request(lowered):
+            state.window_match = WindowMatchFlow(active=True)
         elif _is_window_open_request(lowered):
             state.window = WindowFlow(
                 active=True,
@@ -509,6 +544,7 @@ class PolicyAwareController:
                 active=True,
                 target_color=_extract_ambient_color(lowered),
                 on=not _is_light_off_request(lowered),
+                match_car_color=_is_ambient_light_match_car_color_request(lowered),
             )
         elif _is_trunk_request(lowered):
             state.trunk = TrunkFlow(
@@ -542,6 +578,8 @@ class PolicyAwareController:
                     else _extract_heating_level(lowered)
                 ),
             )
+        elif _is_reading_light_by_occupancy_request(lowered):
+            state.reading_light_occupancy = ReadingLightOccupancyFlow(active=True)
         elif _is_reading_light_request(lowered):
             state.reading_light = ReadingLightFlow(
                 active=True,
@@ -637,6 +675,14 @@ class PolicyAwareController:
                     and state.steering_wheel_heating.level is None
                 ):
                     state.steering_wheel_heating.level = preferred_heating_level
+            elif name == "get_car_color" and isinstance(result, dict):
+                if state.ambient_light.active:
+                    state.ambient_light.car_color_checked = True
+                    car_color = result.get("car_color")
+                    if isinstance(car_color, str):
+                        color = car_color.upper()
+                        if color in AMBIENT_COLORS:
+                            state.ambient_light.target_color = color
             elif name == "open_close_sunshade" and isinstance(result, dict):
                 state.sunroof.sunshade_position = _safe_float(
                     result.get("percentage"), state.sunroof.sunshade_position
@@ -688,6 +734,9 @@ class PolicyAwareController:
                         )
                         _record_air_conditioning_window_position(
                             state.air_conditioning, window, percentage
+                        )
+                        _record_window_match_position(
+                            state.window_match, window, percentage
                         )
             elif name == "set_ambient_lights" and isinstance(result, dict):
                 state.ambient_light.completed = True
@@ -742,6 +791,10 @@ class PolicyAwareController:
                     result.get("window_driver_position"),
                     state.defrost.window_driver_position,
                 )
+                state.window_match.window_driver_position = _safe_int(
+                    result.get("window_driver_position"),
+                    state.window_match.window_driver_position,
+                )
                 state.air_conditioning.window_driver_position = _safe_int(
                     result.get("window_driver_position"),
                     state.air_conditioning.window_driver_position,
@@ -749,6 +802,10 @@ class PolicyAwareController:
                 state.defrost.window_passenger_position = _safe_int(
                     result.get("window_passenger_position"),
                     state.defrost.window_passenger_position,
+                )
+                state.window_match.window_passenger_position = _safe_int(
+                    result.get("window_passenger_position"),
+                    state.window_match.window_passenger_position,
                 )
                 state.air_conditioning.window_passenger_position = _safe_int(
                     result.get("window_passenger_position"),
@@ -758,6 +815,10 @@ class PolicyAwareController:
                     result.get("window_driver_rear_position"),
                     state.defrost.window_driver_rear_position,
                 )
+                state.window_match.window_driver_rear_position = _safe_int(
+                    result.get("window_driver_rear_position"),
+                    state.window_match.window_driver_rear_position,
+                )
                 state.air_conditioning.window_driver_rear_position = _safe_int(
                     result.get("window_driver_rear_position"),
                     state.air_conditioning.window_driver_rear_position,
@@ -766,10 +827,16 @@ class PolicyAwareController:
                     result.get("window_passenger_rear_position"),
                     state.defrost.window_passenger_rear_position,
                 )
+                state.window_match.window_passenger_rear_position = _safe_int(
+                    result.get("window_passenger_rear_position"),
+                    state.window_match.window_passenger_rear_position,
+                )
                 state.air_conditioning.window_passenger_rear_position = _safe_int(
                     result.get("window_passenger_rear_position"),
                     state.air_conditioning.window_passenger_rear_position,
                 )
+                if state.window_match.active:
+                    state.window_match.windows_checked = True
                 if state.air_conditioning.active:
                     state.air_conditioning.windows_checked = True
             elif name == "set_fan_speed" and isinstance(result, dict):
@@ -807,11 +874,25 @@ class PolicyAwareController:
                 if level is not None:
                     state.steering_wheel_heating.level = level
             elif name == "set_reading_light" and isinstance(result, dict):
+                if state.reading_light_occupancy.active:
+                    if state.reading_light_occupancy.pending_actions:
+                        state.reading_light_occupancy.pending_actions.pop(0)
+                    if not state.reading_light_occupancy.pending_actions:
+                        state.reading_light_occupancy.completed = True
                 if state.reading_light.active:
                     state.reading_light.completed = True
                 position = result.get("position")
                 if isinstance(position, str):
                     state.reading_light.position = position
+            elif name == "get_seats_occupancy" and isinstance(result, dict):
+                seats = result.get("seats_occupied")
+                if state.reading_light_occupancy.active:
+                    state.reading_light_occupancy.seats_checked = True
+                    if isinstance(seats, dict):
+                        state.reading_light_occupancy.seats_occupied = {
+                            str(seat): bool(occupied)
+                            for seat, occupied in seats.items()
+                        }
             elif name == "get_location_id_by_location_name":
                 if isinstance(result, dict) and isinstance(result.get("id"), str):
                     state.navigation.destination_id = result["id"]
@@ -1024,6 +1105,82 @@ class PolicyAwareController:
             reason="window_open",
         )
 
+    def _next_window_match_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        match = state.window_match
+
+        if match.completed:
+            state.window_match = WindowMatchFlow()
+            return NextAction.respond(
+                "Done, the rear windows match the front windows.",
+                reason="window_match_done",
+            )
+
+        if not tool_index.has("open_close_window"):
+            return NextAction.respond(
+                "I can't adjust the windows because the window control is unavailable right now.",
+                reason="window_match_missing_window_tool",
+            )
+
+        if not match.windows_checked:
+            if not tool_index.has("get_vehicle_window_positions"):
+                return NextAction.respond(
+                    "I can't match the windows because the window position check is unavailable right now.",
+                    reason="window_match_missing_position_tool",
+                )
+            return NextAction.tool_call(
+                "get_vehicle_window_positions",
+                reason="window_match_position_check",
+            )
+
+        if (
+            match.window_driver_position is None
+            or match.window_passenger_position is None
+            or match.window_driver_rear_position is None
+            or match.window_passenger_rear_position is None
+        ):
+            return NextAction.respond(
+                "I can't match the rear windows because I couldn't determine all current window positions.",
+                reason="window_match_unknown_positions",
+            )
+
+        if match.window_driver_position != match.window_passenger_position:
+            return NextAction.respond(
+                "The two front windows are at different positions. Which front window should the rear windows match?",
+                reason="window_match_ambiguous_front_reference",
+            )
+
+        if not _tool_argument_available(tool_index, "open_close_window", "window"):
+            return NextAction.respond(
+                "I can't match the windows because the required window selector is unavailable right now.",
+                reason="window_match_missing_window_parameter",
+            )
+
+        if not _tool_argument_available(tool_index, "open_close_window", "percentage"):
+            return NextAction.respond(
+                "I can't match the windows because the required window position control is unavailable right now.",
+                reason="window_match_missing_percentage_parameter",
+            )
+
+        target = match.window_driver_position
+        if match.window_driver_rear_position != target:
+            return NextAction.tool_call(
+                "open_close_window",
+                {"window": "DRIVER_REAR", "percentage": target},
+                reason="window_match_driver_rear",
+            )
+
+        if match.window_passenger_rear_position != target:
+            return NextAction.tool_call(
+                "open_close_window",
+                {"window": "PASSENGER_REAR", "percentage": target},
+                reason="window_match_passenger_rear",
+            )
+
+        match.completed = True
+        return self._next_window_match_action(state, tool_index)
+
     def _next_ambient_light_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -1058,6 +1215,22 @@ class PolicyAwareController:
                 "set_ambient_lights",
                 {"on": False, "lightcolor": "NONE"},
                 reason="ambient_light_off",
+            )
+
+        if ambient.match_car_color and ambient.target_color is None:
+            if not ambient.car_color_checked:
+                if not tool_index.has("get_car_color"):
+                    return NextAction.respond(
+                        "I can't match the ambient lights to the car color because the car color check is unavailable right now.",
+                        reason="ambient_light_missing_car_color_tool",
+                    )
+                return NextAction.tool_call(
+                    "get_car_color",
+                    reason="ambient_light_car_color_check",
+                )
+            return NextAction.respond(
+                "I couldn't determine a supported ambient light color from the car color.",
+                reason="ambient_light_unknown_car_color",
             )
 
         if ambient.target_color is None:
@@ -1406,6 +1579,63 @@ class PolicyAwareController:
             "set_steering_wheel_heating",
             {"level": heating.level},
             reason="steering_wheel_heating_set",
+        )
+
+    def _next_reading_light_occupancy_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        occupancy = state.reading_light_occupancy
+
+        if occupancy.completed:
+            state.reading_light_occupancy = ReadingLightOccupancyFlow()
+            return NextAction.respond(
+                "Done, the reading lights now match occupied seats.",
+                reason="reading_light_occupancy_done",
+            )
+
+        if not tool_index.has("set_reading_light"):
+            return NextAction.respond(
+                "I can't change the reading lights because that control is unavailable right now.",
+                reason="reading_light_occupancy_missing_tool",
+            )
+
+        if not _tool_argument_available(tool_index, "set_reading_light", "position"):
+            return NextAction.respond(
+                "I can't change the reading lights because the required position control is unavailable right now.",
+                reason="reading_light_occupancy_missing_position_parameter",
+            )
+
+        if not _tool_argument_available(tool_index, "set_reading_light", "on"):
+            return NextAction.respond(
+                "I can't change the reading lights because the required on/off control is unavailable right now.",
+                reason="reading_light_occupancy_missing_on_parameter",
+            )
+
+        if not occupancy.seats_checked:
+            if not tool_index.has("get_seats_occupancy"):
+                return NextAction.respond(
+                    "I can't optimize the reading lights by occupied seats because seat occupancy is unavailable right now.",
+                    reason="reading_light_occupancy_missing_seats_tool",
+                )
+            return NextAction.tool_call(
+                "get_seats_occupancy",
+                reason="reading_light_occupancy_check",
+            )
+
+        if not occupancy.pending_actions:
+            occupancy.pending_actions = _reading_light_actions_for_occupancy(
+                occupancy.seats_occupied
+            )
+
+        if not occupancy.pending_actions:
+            occupancy.completed = True
+            return self._next_reading_light_occupancy_action(state, tool_index)
+
+        position, on = occupancy.pending_actions[0]
+        return NextAction.tool_call(
+            "set_reading_light",
+            {"position": position, "on": on},
+            reason="reading_light_occupancy_set",
         )
 
     def _next_reading_light_action(
@@ -1952,11 +2182,49 @@ def _is_window_open_request(text: str) -> bool:
     )
 
 
+def _is_window_match_request(text: str) -> bool:
+    if not re.search(r"\bwindows?\b", text):
+        return False
+    if "rear" not in text or "front" not in text:
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "match",
+            "same position",
+            "same level",
+            "same amount",
+            "equal",
+            "even",
+        )
+    )
+
+
 def _is_ambient_light_request(text: str) -> bool:
     return bool(
         ("ambient" in text and ("light" in text or "lighting" in text))
         or "cabin light" in text
         or "mood light" in text
+    )
+
+
+def _is_ambient_light_match_car_color_request(text: str) -> bool:
+    if not _is_ambient_light_request(text):
+        return False
+    if "match" not in text:
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "car color",
+            "car's color",
+            "car colour",
+            "car's colour",
+            "exterior color",
+            "exterior colour",
+            "outside color",
+            "outside colour",
+        )
     )
 
 
@@ -2076,6 +2344,23 @@ def _is_reading_light_request(text: str) -> bool:
     )
 
 
+def _is_reading_light_by_occupancy_request(text: str) -> bool:
+    if "reading light" not in text and "reading lights" not in text and "lights" not in text:
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "occupied seats",
+            "unoccupied seats",
+            "empty seats",
+            "who's actually in the car",
+            "who is actually in the car",
+            "based on who",
+            "waste energy",
+        )
+    )
+
+
 def _is_defrost_request(text: str) -> bool:
     if "defrost" not in text:
         return False
@@ -2157,20 +2442,18 @@ def _is_air_conditioning_off_request(text: str) -> bool:
 def _is_air_quality_question(text: str) -> bool:
     if not any(word in text for word in ("stagnant", "stale", "stuffy")):
         return False
-    if any(
-        phrase in text
-        for phrase in (
-            "turn on",
-            "turn off",
-            "switch on",
-            "switch off",
-            "set",
-            "activate",
-            "deactivate",
-        )
+    if re.search(
+        r"\b(turn on|turn off|switch on|switch off|set|activate|deactivate)\b",
+        text,
     ):
         return False
-    return "what can" in text or "what should" in text or "?" in text
+    return (
+        "what can" in text
+        or "what should" in text
+        or "current climate settings" in text
+        or "climate settings" in text
+        or "?" in text
+    )
 
 
 def _is_simple_navigation_request(text: str) -> bool:
@@ -2690,6 +2973,24 @@ def _record_defrost_window_position(
         defrost.window_passenger_rear_position = percentage
 
 
+def _record_window_match_position(
+    match: WindowMatchFlow, window: str, percentage: int
+) -> None:
+    if window == "ALL":
+        match.window_driver_position = percentage
+        match.window_passenger_position = percentage
+        match.window_driver_rear_position = percentage
+        match.window_passenger_rear_position = percentage
+    elif window == "DRIVER":
+        match.window_driver_position = percentage
+    elif window == "PASSENGER":
+        match.window_passenger_position = percentage
+    elif window in {"DRIVER_REAR", "RIGHT_REAR"}:
+        match.window_driver_rear_position = percentage
+    elif window in {"PASSENGER_REAR", "LEFT_REAR"}:
+        match.window_passenger_rear_position = percentage
+
+
 def _defrost_window_positions(defrost: DefrostFlow) -> tuple[int | None, ...]:
     return (
         defrost.window_driver_position,
@@ -2745,6 +3046,28 @@ def _air_conditioning_open_windows(ac: AirConditioningFlow) -> list[tuple[str, i
         for window, position in _air_conditioning_window_positions(ac)
         if position is not None and position > 20
     ]
+
+
+def _reading_light_actions_for_occupancy(
+    seats_occupied: dict[str, bool]
+) -> list[tuple[str, bool]]:
+    seat_to_light = {
+        "driver": "DRIVER",
+        "passenger": "PASSENGER",
+        "driver_rear": "DRIVER_REAR",
+        "passenger_rear": "PASSENGER_REAR",
+    }
+    occupied_order = ("driver", "passenger", "driver_rear", "passenger_rear")
+    unoccupied_order = ("driver_rear", "passenger_rear", "passenger", "driver")
+
+    actions: list[tuple[str, bool]] = []
+    for seat in occupied_order:
+        if seats_occupied.get(seat) is True:
+            actions.append((seat_to_light[seat], True))
+    for seat in unoccupied_order:
+        if seats_occupied.get(seat) is False:
+            actions.append((seat_to_light[seat], False))
+    return actions
 
 
 def _any_defrost_window_open_over(defrost: DefrostFlow, threshold: int) -> bool:
