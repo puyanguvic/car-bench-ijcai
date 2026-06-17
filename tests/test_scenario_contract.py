@@ -25,6 +25,7 @@ loguru_logger.disable("agentbeats.run_scenario")
 
 EXPECTED_SCENARIO_FILES = {
     "local_smoke.toml",
+    "local_public_batch.toml",
     "local_test_set.toml",
     "local_docker_smoke.toml",
     "local_docker_test_set.toml",
@@ -92,6 +93,14 @@ class ScenarioContractTest(unittest.TestCase):
                     self.assertEqual(config["tasks_base_num_tasks"], 1)
                     self.assertEqual(config["tasks_hallucination_num_tasks"], 1)
                     self.assertEqual(config["tasks_disambiguation_num_tasks"], 1)
+
+                data = tomllib.loads((scenario_dir / "local_public_batch.toml").read_text())
+                config = data["config"]
+                self.assertEqual(config["num_trials"], 1)
+                self.assertEqual(config["task_split"], "test")
+                self.assertEqual(config["tasks_base_num_tasks"], 10)
+                self.assertEqual(config["tasks_hallucination_num_tasks"], 10)
+                self.assertEqual(config["tasks_disambiguation_num_tasks"], 10)
 
                 for name in ("local_test_set.toml", "local_docker_test_set.toml", "ghcr_test_set.toml"):
                     data = tomllib.loads((scenario_dir / name).read_text())
