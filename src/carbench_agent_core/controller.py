@@ -77,6 +77,13 @@ class SunroofFlow:
 
 
 @dataclass
+class SunshadeFlow:
+    active: bool = False
+    target_percentage: int | None = None
+    completed: bool = False
+
+
+@dataclass
 class WindowFlow:
     active: bool = False
     window: str = "ALL"
@@ -111,6 +118,53 @@ class AirCirculationFlow:
     active: bool = False
     mode: Literal["FRESH_AIR", "RECIRCULATION", "AUTO"] | None = None
     preferences_checked: bool = False
+    completed: bool = False
+
+
+@dataclass
+class AirConditioningFlow:
+    active: bool = False
+    on: bool = True
+    fan_target_level: int | None = None
+    climate_checked: bool = False
+    windows_checked: bool = False
+    fan_speed: int | None = None
+    air_conditioning: bool | None = None
+    window_driver_position: int | None = None
+    window_passenger_position: int | None = None
+    window_driver_rear_position: int | None = None
+    window_passenger_rear_position: int | None = None
+    completed: bool = False
+
+
+@dataclass
+class AirQualityFlow:
+    active: bool = False
+    climate_checked: bool = False
+    fan_speed: int | None = None
+
+
+@dataclass
+class FanSpeedFlow:
+    active: bool = False
+    level: int | None = None
+    preferences_checked: bool = False
+    completed: bool = False
+
+
+@dataclass
+class SteeringWheelHeatingFlow:
+    active: bool = False
+    level: int | None = None
+    preferences_checked: bool = False
+    completed: bool = False
+
+
+@dataclass
+class ReadingLightFlow:
+    active: bool = False
+    position: str | None = None
+    on: bool = True
     completed: bool = False
 
 
@@ -180,10 +234,18 @@ class DefrostFlow:
 class ControllerState:
     runtime: RuntimeContext = field(default_factory=RuntimeContext)
     sunroof: SunroofFlow = field(default_factory=SunroofFlow)
+    sunshade: SunshadeFlow = field(default_factory=SunshadeFlow)
     window: WindowFlow = field(default_factory=WindowFlow)
     ambient_light: AmbientLightFlow = field(default_factory=AmbientLightFlow)
     trunk: TrunkFlow = field(default_factory=TrunkFlow)
     air_circulation: AirCirculationFlow = field(default_factory=AirCirculationFlow)
+    air_conditioning: AirConditioningFlow = field(default_factory=AirConditioningFlow)
+    air_quality: AirQualityFlow = field(default_factory=AirQualityFlow)
+    fan_speed: FanSpeedFlow = field(default_factory=FanSpeedFlow)
+    steering_wheel_heating: SteeringWheelHeatingFlow = field(
+        default_factory=SteeringWheelHeatingFlow
+    )
+    reading_light: ReadingLightFlow = field(default_factory=ReadingLightFlow)
     navigation: NavigationFlow = field(default_factory=NavigationFlow)
     high_beam: HighBeamFlow = field(default_factory=HighBeamFlow)
     fog_lights: FogLightFlow = field(default_factory=FogLightFlow)
@@ -223,6 +285,8 @@ class PolicyAwareController:
 
         if state.sunroof.active:
             return self._next_sunroof_action(state, tool_index)
+        if state.sunshade.active:
+            return self._next_sunshade_action(state, tool_index)
         if state.window.active:
             return self._next_window_action(state, tool_index)
         if state.ambient_light.active:
@@ -231,6 +295,16 @@ class PolicyAwareController:
             return self._next_trunk_action(state, tool_index)
         if state.air_circulation.active:
             return self._next_air_circulation_action(state, tool_index)
+        if state.air_conditioning.active:
+            return self._next_air_conditioning_action(state, tool_index)
+        if state.air_quality.active:
+            return self._next_air_quality_action(state, tool_index)
+        if state.fan_speed.active:
+            return self._next_fan_speed_action(state, tool_index)
+        if state.steering_wheel_heating.active:
+            return self._next_steering_wheel_heating_action(state, tool_index)
+        if state.reading_light.active:
+            return self._next_reading_light_action(state, tool_index)
         if state.defrost.active:
             return self._next_defrost_action(state, tool_index)
         if state.navigation.active:
@@ -326,6 +400,12 @@ class PolicyAwareController:
                 sunroof.target_percentage = clarified
                 return
 
+        if state.sunshade.active and state.sunshade.target_percentage is None:
+            clarified = _extract_percentage(lowered, allow_standalone=True)
+            if clarified is not None:
+                state.sunshade.target_percentage = clarified
+                return
+
         if window.active and window.target_percentage is None:
             clarified = _extract_percentage(lowered, allow_standalone=True)
             if clarified is not None:
@@ -342,6 +422,50 @@ class PolicyAwareController:
             clarified_mode = _extract_air_circulation_mode(lowered)
             if clarified_mode is not None:
                 state.air_circulation.mode = clarified_mode
+                return
+
+        if state.air_quality.active:
+            clarified_level = _extract_level(lowered)
+            clarified_mode = _extract_air_circulation_mode(lowered)
+            if clarified_level is not None or "fan" in lowered:
+                state.fan_speed = FanSpeedFlow(active=True, level=clarified_level)
+                state.air_quality = AirQualityFlow()
+                return
+            if clarified_mode is not None:
+                state.air_circulation = AirCirculationFlow(
+                    active=True,
+                    mode=clarified_mode,
+                )
+                state.air_quality = AirQualityFlow()
+                return
+            if _is_air_conditioning_request(lowered):
+                state.air_conditioning = AirConditioningFlow(
+                    active=True,
+                    on=not _is_air_conditioning_off_request(lowered),
+                    fan_target_level=_extract_level(lowered),
+                )
+                state.air_quality = AirQualityFlow()
+                return
+
+        if state.fan_speed.active and state.fan_speed.level is None:
+            clarified_level = _extract_level(lowered)
+            if clarified_level is not None:
+                state.fan_speed.level = clarified_level
+                return
+
+        if (
+            state.steering_wheel_heating.active
+            and state.steering_wheel_heating.level is None
+        ):
+            clarified_level = _extract_heating_level(lowered)
+            if clarified_level is not None:
+                state.steering_wheel_heating.level = clarified_level
+                return
+
+        if state.reading_light.active and state.reading_light.position is None:
+            clarified_position = _extract_reading_light_position(lowered)
+            if clarified_position is not None:
+                state.reading_light.position = clarified_position
                 return
 
         if state.defrost.active and state.defrost.defrost_window is None:
@@ -369,6 +493,11 @@ class PolicyAwareController:
                 active=True,
                 target_percentage=_extract_sunroof_percentage(lowered),
             )
+        elif _is_sunshade_request(lowered):
+            state.sunshade = SunshadeFlow(
+                active=True,
+                target_percentage=_extract_sunshade_percentage(lowered),
+            )
         elif _is_window_open_request(lowered):
             state.window = WindowFlow(
                 active=True,
@@ -390,6 +519,34 @@ class PolicyAwareController:
             state.air_circulation = AirCirculationFlow(
                 active=True,
                 mode=_extract_air_circulation_mode(lowered),
+            )
+        elif _is_air_conditioning_request(lowered):
+            state.air_conditioning = AirConditioningFlow(
+                active=True,
+                on=not _is_air_conditioning_off_request(lowered),
+                fan_target_level=_extract_level(lowered),
+            )
+        elif _is_air_quality_question(lowered):
+            state.air_quality = AirQualityFlow(active=True)
+        elif _is_fan_speed_request(lowered):
+            state.fan_speed = FanSpeedFlow(
+                active=True,
+                level=0 if _is_light_off_request(lowered) else _extract_level(lowered),
+            )
+        elif _is_steering_wheel_heating_request(lowered):
+            state.steering_wheel_heating = SteeringWheelHeatingFlow(
+                active=True,
+                level=(
+                    0
+                    if _is_light_off_request(lowered)
+                    else _extract_heating_level(lowered)
+                ),
+            )
+        elif _is_reading_light_request(lowered):
+            state.reading_light = ReadingLightFlow(
+                active=True,
+                position=_extract_reading_light_position(lowered),
+                on=not _is_light_off_request(lowered),
             )
         elif _is_defrost_request(lowered):
             state.defrost = DefrostFlow(
@@ -465,10 +622,30 @@ class PolicyAwareController:
                 preferred_mode = _extract_preferred_air_circulation_mode(result)
                 if preferred_mode is not None and state.air_circulation.mode is None:
                     state.air_circulation.mode = preferred_mode
+
+                state.fan_speed.preferences_checked = True
+                preferred_fan_level = _extract_preferred_fan_speed_level(result)
+                if preferred_fan_level is not None and state.fan_speed.level is None:
+                    state.fan_speed.level = preferred_fan_level
+
+                state.steering_wheel_heating.preferences_checked = True
+                preferred_heating_level = _extract_preferred_steering_heating_level(
+                    result
+                )
+                if (
+                    preferred_heating_level is not None
+                    and state.steering_wheel_heating.level is None
+                ):
+                    state.steering_wheel_heating.level = preferred_heating_level
             elif name == "open_close_sunshade" and isinstance(result, dict):
                 state.sunroof.sunshade_position = _safe_float(
                     result.get("percentage"), state.sunroof.sunshade_position
                 )
+                if state.sunshade.active:
+                    state.sunshade.completed = True
+                    state.sunshade.target_percentage = _safe_int(
+                        result.get("percentage"), state.sunshade.target_percentage
+                    )
             elif name == "open_close_sunroof" and isinstance(result, dict):
                 state.sunroof.sunroof_position = _safe_float(
                     result.get("percentage"), state.sunroof.sunroof_position
@@ -479,16 +656,23 @@ class PolicyAwareController:
                 ac_value = result.get("air_conditioning")
                 if isinstance(ac_value, bool):
                     state.window.ac_on = ac_value
+                    state.air_conditioning.air_conditioning = ac_value
 
                 state.defrost.climate_checked = True
                 fan_speed = _safe_int(result.get("fan_speed"), state.defrost.fan_speed)
                 if fan_speed is not None:
                     state.defrost.fan_speed = fan_speed
+                    state.air_conditioning.fan_speed = fan_speed
                 airflow = result.get("fan_airflow_direction")
                 if isinstance(airflow, str):
                     state.defrost.fan_airflow_direction = airflow
                 if isinstance(ac_value, bool):
                     state.defrost.air_conditioning = ac_value
+                if state.air_conditioning.active:
+                    state.air_conditioning.climate_checked = True
+                if state.air_quality.active:
+                    state.air_quality.climate_checked = True
+                    state.air_quality.fan_speed = fan_speed
             elif name == "open_close_window" and isinstance(result, dict):
                 state.window.completed = True
                 state.window.target_percentage = _safe_int(
@@ -501,6 +685,9 @@ class PolicyAwareController:
                     if percentage is not None:
                         _record_defrost_window_position(
                             state.defrost, window, percentage
+                        )
+                        _record_air_conditioning_window_position(
+                            state.air_conditioning, window, percentage
                         )
             elif name == "set_ambient_lights" and isinstance(result, dict):
                 state.ambient_light.completed = True
@@ -555,22 +742,44 @@ class PolicyAwareController:
                     result.get("window_driver_position"),
                     state.defrost.window_driver_position,
                 )
+                state.air_conditioning.window_driver_position = _safe_int(
+                    result.get("window_driver_position"),
+                    state.air_conditioning.window_driver_position,
+                )
                 state.defrost.window_passenger_position = _safe_int(
                     result.get("window_passenger_position"),
                     state.defrost.window_passenger_position,
+                )
+                state.air_conditioning.window_passenger_position = _safe_int(
+                    result.get("window_passenger_position"),
+                    state.air_conditioning.window_passenger_position,
                 )
                 state.defrost.window_driver_rear_position = _safe_int(
                     result.get("window_driver_rear_position"),
                     state.defrost.window_driver_rear_position,
                 )
+                state.air_conditioning.window_driver_rear_position = _safe_int(
+                    result.get("window_driver_rear_position"),
+                    state.air_conditioning.window_driver_rear_position,
+                )
                 state.defrost.window_passenger_rear_position = _safe_int(
                     result.get("window_passenger_rear_position"),
                     state.defrost.window_passenger_rear_position,
                 )
+                state.air_conditioning.window_passenger_rear_position = _safe_int(
+                    result.get("window_passenger_rear_position"),
+                    state.air_conditioning.window_passenger_rear_position,
+                )
+                if state.air_conditioning.active:
+                    state.air_conditioning.windows_checked = True
             elif name == "set_fan_speed" and isinstance(result, dict):
                 level = _safe_int(result.get("level"), state.defrost.fan_speed)
                 if level is not None:
                     state.defrost.fan_speed = level
+                    state.fan_speed.level = level
+                    state.air_conditioning.fan_speed = level
+                if state.fan_speed.active:
+                    state.fan_speed.completed = True
             elif name == "set_fan_airflow_direction" and isinstance(result, dict):
                 direction = result.get("direction")
                 if isinstance(direction, str):
@@ -579,6 +788,10 @@ class PolicyAwareController:
                 on_value = result.get("on")
                 if isinstance(on_value, bool):
                     state.defrost.air_conditioning = on_value
+                    state.air_conditioning.air_conditioning = on_value
+                    state.air_conditioning.on = on_value
+                if state.air_conditioning.active:
+                    state.air_conditioning.completed = True
             elif name == "set_window_defrost" and isinstance(result, dict):
                 state.defrost.completed = True
                 on_value = result.get("on")
@@ -587,6 +800,18 @@ class PolicyAwareController:
                 defrost_window = result.get("defrost_window")
                 if defrost_window in {"ALL", "FRONT", "REAR"}:
                     state.defrost.defrost_window = defrost_window
+            elif name == "set_steering_wheel_heating" and isinstance(result, dict):
+                if state.steering_wheel_heating.active:
+                    state.steering_wheel_heating.completed = True
+                level = _safe_int(result.get("level"), state.steering_wheel_heating.level)
+                if level is not None:
+                    state.steering_wheel_heating.level = level
+            elif name == "set_reading_light" and isinstance(result, dict):
+                if state.reading_light.active:
+                    state.reading_light.completed = True
+                position = result.get("position")
+                if isinstance(position, str):
+                    state.reading_light.position = position
             elif name == "get_location_id_by_location_name":
                 if isinstance(result, dict) and isinstance(result.get("id"), str):
                     state.navigation.destination_id = result["id"]
@@ -705,6 +930,43 @@ class PolicyAwareController:
             "open_close_sunroof",
             {"percentage": sunroof.target_percentage},
             reason="sunroof_open",
+        )
+
+    def _next_sunshade_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        sunshade = state.sunshade
+
+        if sunshade.completed:
+            target = _format_percentage(sunshade.target_percentage)
+            state.sunshade = SunshadeFlow()
+            return NextAction.respond(
+                f"Done, the sunshade is set to {target}.",
+                reason="sunshade_done",
+            )
+
+        if not tool_index.has("open_close_sunshade"):
+            return NextAction.respond(
+                "I can't adjust the sunshade because that control is unavailable right now.",
+                reason="sunshade_missing_tool",
+            )
+
+        if not _tool_argument_available(tool_index, "open_close_sunshade", "percentage"):
+            return NextAction.respond(
+                "I can't adjust the sunshade because the required position control is unavailable right now.",
+                reason="sunshade_missing_percentage_parameter",
+            )
+
+        if sunshade.target_percentage is None:
+            return NextAction.respond(
+                "How far would you like me to set the sunshade?",
+                reason="sunshade_user_disambiguation",
+            )
+
+        return NextAction.tool_call(
+            "open_close_sunshade",
+            {"percentage": sunshade.target_percentage},
+            reason="sunshade_set",
         )
 
     def _next_window_action(
@@ -899,6 +1161,298 @@ class PolicyAwareController:
             reason="air_circulation_set",
         )
 
+    def _next_air_conditioning_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        ac = state.air_conditioning
+
+        if ac.completed:
+            on = ac.on
+            state.air_conditioning = AirConditioningFlow()
+            return NextAction.respond(
+                "Done, the air conditioning is on."
+                if on
+                else "Done, the air conditioning is off.",
+                reason="air_conditioning_done",
+            )
+
+        if not tool_index.has("set_air_conditioning"):
+            return NextAction.respond(
+                "I can't change the air conditioning because that control is unavailable right now.",
+                reason="air_conditioning_missing_tool",
+            )
+
+        if not _tool_argument_available(tool_index, "set_air_conditioning", "on"):
+            return NextAction.respond(
+                "I can't change the air conditioning because the required on/off control is unavailable right now.",
+                reason="air_conditioning_missing_on_parameter",
+            )
+
+        if not ac.on:
+            return NextAction.tool_call(
+                "set_air_conditioning",
+                {"on": False},
+                reason="air_conditioning_off",
+            )
+
+        if not ac.climate_checked:
+            if not tool_index.has("get_climate_settings"):
+                return NextAction.respond(
+                    "I can't safely turn on the air conditioning because the climate settings check is unavailable right now.",
+                    reason="air_conditioning_missing_climate_tool",
+                )
+            return NextAction.tool_call(
+                "get_climate_settings",
+                reason="air_conditioning_climate_check",
+            )
+
+        if not ac.windows_checked:
+            if not tool_index.has("get_vehicle_window_positions"):
+                return NextAction.respond(
+                    "I can't safely turn on the air conditioning because the window position check is unavailable right now.",
+                    reason="air_conditioning_missing_window_positions_tool",
+                )
+            return NextAction.tool_call(
+                "get_vehicle_window_positions",
+                reason="air_conditioning_window_position_check",
+            )
+
+        if _air_conditioning_window_status_unknown(ac):
+            return NextAction.respond(
+                "I can't safely turn on the air conditioning because I couldn't determine all window positions first.",
+                reason="air_conditioning_unknown_window_positions",
+            )
+
+        open_windows = _air_conditioning_open_windows(ac)
+        if open_windows:
+            if not tool_index.has("open_close_window"):
+                return NextAction.respond(
+                    "I can't safely turn on the air conditioning because open windows need to be closed first and the window control is unavailable.",
+                    reason="air_conditioning_missing_window_control",
+                )
+            if not _tool_argument_available(tool_index, "open_close_window", "window"):
+                return NextAction.respond(
+                    "I can't safely close the open windows because the required window selector is unavailable right now.",
+                    reason="air_conditioning_missing_window_parameter",
+                )
+            if not _tool_argument_available(
+                tool_index, "open_close_window", "percentage"
+            ):
+                return NextAction.respond(
+                    "I can't safely close the open windows because the required window position control is unavailable right now.",
+                    reason="air_conditioning_missing_percentage_parameter",
+                )
+            window, _ = open_windows[0]
+            return NextAction.tool_call(
+                "open_close_window",
+                {"window": window, "percentage": 0},
+                reason="air_conditioning_close_open_window",
+            )
+
+        target_level = ac.fan_target_level
+        if target_level is None and (ac.fan_speed is None or ac.fan_speed == 0):
+            target_level = 1
+
+        if target_level is not None and ac.fan_speed != target_level:
+            if not tool_index.has("set_fan_speed"):
+                return NextAction.respond(
+                    "I can't safely turn on the air conditioning because the fan speed control is unavailable right now.",
+                    reason="air_conditioning_missing_fan_speed_tool",
+                )
+            if not _tool_argument_available(tool_index, "set_fan_speed", "level"):
+                return NextAction.respond(
+                    "I can't safely turn on the air conditioning because the required fan speed level control is unavailable right now.",
+                    reason="air_conditioning_missing_fan_level_parameter",
+                )
+            return NextAction.tool_call(
+                "set_fan_speed",
+                {"level": target_level},
+                reason="air_conditioning_set_fan_speed",
+            )
+
+        if ac.air_conditioning is True:
+            state.air_conditioning = AirConditioningFlow()
+            return NextAction.respond(
+                "Done, the air conditioning is on.",
+                reason="air_conditioning_already_on",
+            )
+
+        return NextAction.tool_call(
+            "set_air_conditioning",
+            {"on": True},
+            reason="air_conditioning_on",
+        )
+
+    def _next_air_quality_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        air_quality = state.air_quality
+
+        if not air_quality.climate_checked and tool_index.has("get_climate_settings"):
+            return NextAction.tool_call(
+                "get_climate_settings",
+                reason="air_quality_climate_check",
+            )
+
+        fan_status = (
+            "currently off"
+            if air_quality.fan_speed == 0
+            else (
+                f"currently at level {air_quality.fan_speed}"
+                if air_quality.fan_speed is not None
+                else "not currently known"
+            )
+        )
+        return NextAction.respond(
+            "The fan is "
+            f"{fan_status}. I can turn on the fan, change air circulation, or turn on the air conditioning. Which would you like?",
+            reason="air_quality_user_disambiguation",
+        )
+
+    def _next_fan_speed_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        fan = state.fan_speed
+
+        if fan.completed:
+            level = fan.level if fan.level is not None else "the requested level"
+            state.fan_speed = FanSpeedFlow()
+            return NextAction.respond(
+                f"Done, the fan speed is set to level {level}.",
+                reason="fan_speed_done",
+            )
+
+        if not tool_index.has("set_fan_speed"):
+            return NextAction.respond(
+                "I can't adjust the fan speed because that control is unavailable right now.",
+                reason="fan_speed_missing_tool",
+            )
+
+        if not _tool_argument_available(tool_index, "set_fan_speed", "level"):
+            return NextAction.respond(
+                "I can't adjust the fan speed because the required level control is unavailable right now.",
+                reason="fan_speed_missing_level_parameter",
+            )
+
+        if fan.level is None:
+            if not fan.preferences_checked and tool_index.has("get_user_preferences"):
+                return NextAction.tool_call(
+                    "get_user_preferences",
+                    {
+                        "preference_categories": {
+                            "vehicle_settings": {"climate_control": True}
+                        }
+                    },
+                    reason="fan_speed_internal_disambiguation_preferences",
+                )
+            return NextAction.respond(
+                "What fan speed level should I set?",
+                reason="fan_speed_user_disambiguation",
+            )
+
+        return NextAction.tool_call(
+            "set_fan_speed",
+            {"level": fan.level},
+            reason="fan_speed_set",
+        )
+
+    def _next_steering_wheel_heating_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        heating = state.steering_wheel_heating
+
+        if heating.completed:
+            level = heating.level if heating.level is not None else "the requested level"
+            state.steering_wheel_heating = SteeringWheelHeatingFlow()
+            return NextAction.respond(
+                f"Done, the steering wheel heating is set to level {level}.",
+                reason="steering_wheel_heating_done",
+            )
+
+        if not tool_index.has("set_steering_wheel_heating"):
+            return NextAction.respond(
+                "I can't adjust the steering wheel heating because that control is unavailable right now.",
+                reason="steering_wheel_heating_missing_tool",
+            )
+
+        if not _tool_argument_available(
+            tool_index, "set_steering_wheel_heating", "level"
+        ):
+            return NextAction.respond(
+                "I can't adjust the steering wheel heating because the required level control is unavailable right now.",
+                reason="steering_wheel_heating_missing_level_parameter",
+            )
+
+        if heating.level is None:
+            if not heating.preferences_checked and tool_index.has("get_user_preferences"):
+                return NextAction.tool_call(
+                    "get_user_preferences",
+                    {
+                        "preference_categories": {
+                            "vehicle_settings": {
+                                "climate_control": True,
+                                "vehicle_settings": True,
+                            }
+                        }
+                    },
+                    reason="steering_wheel_heating_internal_disambiguation_preferences",
+                )
+            return NextAction.respond(
+                "What steering wheel heating level should I set?",
+                reason="steering_wheel_heating_user_disambiguation",
+            )
+
+        return NextAction.tool_call(
+            "set_steering_wheel_heating",
+            {"level": heating.level},
+            reason="steering_wheel_heating_set",
+        )
+
+    def _next_reading_light_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        reading_light = state.reading_light
+
+        if reading_light.completed:
+            position = _friendly_reading_light_position(reading_light.position)
+            state.reading_light = ReadingLightFlow()
+            return NextAction.respond(
+                f"Done, {position} reading light is on."
+                if reading_light.on
+                else f"Done, {position} reading light is off.",
+                reason="reading_light_done",
+            )
+
+        if not tool_index.has("set_reading_light"):
+            return NextAction.respond(
+                "I can't change the reading lights because that control is unavailable right now.",
+                reason="reading_light_missing_tool",
+            )
+
+        if not _tool_argument_available(tool_index, "set_reading_light", "position"):
+            return NextAction.respond(
+                "I can't change the reading lights because the required position control is unavailable right now.",
+                reason="reading_light_missing_position_parameter",
+            )
+
+        if not _tool_argument_available(tool_index, "set_reading_light", "on"):
+            return NextAction.respond(
+                "I can't change the reading lights because the required on/off control is unavailable right now.",
+                reason="reading_light_missing_on_parameter",
+            )
+
+        if reading_light.position is None:
+            return NextAction.respond(
+                "Which reading light should I turn on: driver, passenger, driver rear, or passenger rear?",
+                reason="reading_light_user_disambiguation",
+            )
+
+        return NextAction.tool_call(
+            "set_reading_light",
+            {"position": reading_light.position, "on": reading_light.on},
+            reason="reading_light_set",
+        )
+
     def _next_high_beam_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -943,6 +1497,12 @@ class PolicyAwareController:
             return NextAction.respond(
                 "I can't turn on the high beams while the fog lights are on, because that combination reduces visibility.",
                 reason="high_beam_fog_light_conflict",
+            )
+
+        if high_beam.on and high_beam.fog_lights_on is None:
+            return NextAction.respond(
+                "I can't safely turn on the high beams because I couldn't determine the current fog light status.",
+                reason="high_beam_unknown_fog_light_status",
             )
 
         if not high_beam.confirmed:
@@ -1351,6 +1911,25 @@ def _is_sunroof_open_request(text: str) -> bool:
     return any(word in text for word in ("open", "fresh air", "vent"))
 
 
+def _is_sunshade_request(text: str) -> bool:
+    if "sunshade" not in text or "sunroof" in text:
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "open",
+            "close",
+            "shut",
+            "adjust",
+            "set",
+            "help",
+            "too bright",
+            "sun is",
+            "sun's",
+        )
+    )
+
+
 def _is_window_open_request(text: str) -> bool:
     if "sunroof" in text:
         return False
@@ -1391,7 +1970,12 @@ def _is_light_off_request(text: str) -> bool:
 
 
 def _is_high_beam_request(text: str) -> bool:
-    if not re.search(r"\bhigh[- ]beams?\b", text):
+    if re.search(r"\blow[- ]beams?\b", text):
+        return False
+    if not (
+        re.search(r"\bhigh[- ]beams?\b", text)
+        or re.search(r"\bbeams?\b", text)
+    ):
         return False
     return any(
         phrase in text
@@ -1423,6 +2007,71 @@ def _is_fog_light_request(text: str) -> bool:
             "set",
             "need",
             "want",
+        )
+    )
+
+
+def _is_fan_speed_request(text: str) -> bool:
+    if not re.search(r"\bfan\b", text):
+        return False
+    if "airflow direction" in text or "air flow direction" in text:
+        return False
+    if (
+        ("air conditioning" in text or re.search(r"\bac\b", text))
+        and re.search(r"\bwindows?\b", text)
+    ):
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "turn on",
+            "turn off",
+            "switch on",
+            "switch off",
+            "set",
+            "increase",
+            "decrease",
+            "level",
+            "speed",
+        )
+    )
+
+
+def _is_steering_wheel_heating_request(text: str) -> bool:
+    if "steering wheel" not in text:
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "heating",
+            "heated",
+            "heat",
+            "warm",
+            "cold",
+            "chilly",
+            "turn on",
+            "turn off",
+            "switch on",
+            "switch off",
+            "set",
+        )
+    )
+
+
+def _is_reading_light_request(text: str) -> bool:
+    if "reading light" not in text and "reading lights" not in text:
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "turn on",
+            "turn off",
+            "switch on",
+            "switch off",
+            "activate",
+            "deactivate",
+            "set",
+            "need",
         )
     )
 
@@ -1474,6 +2123,54 @@ def _is_air_circulation_request(text: str) -> bool:
             "do not like",
         )
     )
+
+
+def _is_air_conditioning_request(text: str) -> bool:
+    if "air conditioning" not in text and not re.search(r"\bac\b", text):
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "turn on",
+            "turn off",
+            "switch on",
+            "switch off",
+            "activate",
+            "deactivate",
+            "set",
+            "cool",
+        )
+    )
+
+
+def _is_air_conditioning_off_request(text: str) -> bool:
+    return bool(
+        "deactivate" in text
+        or re.search(r"\bturn off (?:the )?(?:air conditioning|ac)\b", text)
+        or re.search(r"\bswitch off (?:the )?(?:air conditioning|ac)\b", text)
+        or re.search(r"\b(?:air conditioning|ac) off\b", text)
+        or re.search(r"\bturn (?:the )?(?:air conditioning|ac) off\b", text)
+        or re.search(r"\bswitch (?:the )?(?:air conditioning|ac) off\b", text)
+    )
+
+
+def _is_air_quality_question(text: str) -> bool:
+    if not any(word in text for word in ("stagnant", "stale", "stuffy")):
+        return False
+    if any(
+        phrase in text
+        for phrase in (
+            "turn on",
+            "turn off",
+            "switch on",
+            "switch off",
+            "set",
+            "activate",
+            "deactivate",
+        )
+    ):
+        return False
+    return "what can" in text or "what should" in text or "?" in text
 
 
 def _is_simple_navigation_request(text: str) -> bool:
@@ -1717,6 +2414,10 @@ def _extract_sunroof_percentage(
     return None
 
 
+def _extract_sunshade_percentage(text: str) -> int | None:
+    return _extract_percentage(text)
+
+
 def _extract_percentage(text: str, *, allow_standalone: bool = False) -> int | None:
     if any(word in text for word in ("half", "halfway")):
         return 50
@@ -1768,6 +2469,45 @@ def _extract_ambient_color(text: str) -> str | None:
             return color
     if "off" in text or "none" in text:
         return "NONE"
+    return None
+
+
+def _extract_level(text: str) -> int | None:
+    match = re.search(r"\blevel\s*([0-5])\b", text)
+    if match:
+        return int(match.group(1))
+
+    match = re.search(r"\bfan[^.?!,;]*?\b([0-5])\b", text)
+    if match:
+        return int(match.group(1))
+
+    return None
+
+
+def _extract_heating_level(text: str) -> int | None:
+    level = _extract_level(text)
+    if level is not None:
+        return level
+    if "medium" in text:
+        return 2
+    if "low" in text:
+        return 1
+    if "high" in text:
+        return 3
+    return None
+
+
+def _extract_reading_light_position(text: str) -> str | None:
+    if "driver rear" in text or "rear driver" in text or "left rear" in text:
+        return "DRIVER_REAR"
+    if "passenger rear" in text or "rear passenger" in text or "right rear" in text:
+        return "PASSENGER_REAR"
+    if re.search(r"\bdriver\b", text) and "rear" not in text:
+        return "DRIVER"
+    if re.search(r"\bpassenger\b", text) and "rear" not in text:
+        return "PASSENGER"
+    if re.search(r"\b(all|both)\b", text):
+        return "ALL"
     return None
 
 
@@ -1843,6 +2583,12 @@ def _parse_tool_result_content(tool_result: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _tool_argument_available(
+    tool_index: ToolIndex, tool_name: str, argument_name: str
+) -> bool:
+    return argument_name in tool_index.arg_names(tool_name)
+
+
 def _extract_preferred_sunroof_percentage(result: dict[str, Any]) -> int | None:
     text = json.dumps(result, ensure_ascii=False).lower()
     match = re.search(r"default value to open the sunroof is\s*(\d{1,3})\s*%", text)
@@ -1871,6 +2617,45 @@ def _extract_preferred_ambient_color(result: dict[str, Any]) -> str | None:
     for color in sorted(AMBIENT_COLORS, key=len, reverse=True):
         if re.search(rf"\b{re.escape(color)}\b", text):
             return color
+    return None
+
+
+def _extract_preferred_fan_speed_level(result: dict[str, Any]) -> int | None:
+    text = json.dumps(result, ensure_ascii=False).lower()
+    if "fan" not in text:
+        return None
+
+    patterns = (
+        r"fan[^.?!;]*?level\s*([0-5])",
+        r"fan[^.?!;]*?speed[^.?!;]*?([0-5])",
+        r"level\s*([0-5])[^.?!;]*?fan",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return _safe_int(match.group(1))
+    return None
+
+
+def _extract_preferred_steering_heating_level(result: dict[str, Any]) -> int | None:
+    text = json.dumps(result, ensure_ascii=False).lower()
+    if "steering wheel" not in text:
+        return None
+
+    match = re.search(r"steering wheel[^.?!;]*?level\s*([0-5])", text)
+    if match:
+        return _safe_int(match.group(1))
+
+    match = re.search(r"level\s*([0-5])[^.?!;]*?steering wheel", text)
+    if match:
+        return _safe_int(match.group(1))
+
+    if "medium" in text:
+        return 2
+    if "low" in text:
+        return 1
+    if "high" in text:
+        return 3
     return None
 
 
@@ -1918,6 +2703,50 @@ def _defrost_window_status_unknown(defrost: DefrostFlow) -> bool:
     return any(value is None for value in _defrost_window_positions(defrost))
 
 
+def _record_air_conditioning_window_position(
+    ac: AirConditioningFlow, window: str, percentage: int
+) -> None:
+    if window == "ALL":
+        ac.window_driver_position = percentage
+        ac.window_passenger_position = percentage
+        ac.window_driver_rear_position = percentage
+        ac.window_passenger_rear_position = percentage
+    elif window == "DRIVER":
+        ac.window_driver_position = percentage
+    elif window == "PASSENGER":
+        ac.window_passenger_position = percentage
+    elif window in {"DRIVER_REAR", "RIGHT_REAR"}:
+        ac.window_driver_rear_position = percentage
+    elif window in {"PASSENGER_REAR", "LEFT_REAR"}:
+        ac.window_passenger_rear_position = percentage
+
+
+def _air_conditioning_window_positions(ac: AirConditioningFlow) -> tuple[
+    tuple[str, int | None], ...
+]:
+    return (
+        ("DRIVER", ac.window_driver_position),
+        ("PASSENGER", ac.window_passenger_position),
+        ("DRIVER_REAR", ac.window_driver_rear_position),
+        ("PASSENGER_REAR", ac.window_passenger_rear_position),
+    )
+
+
+def _air_conditioning_window_status_unknown(ac: AirConditioningFlow) -> bool:
+    return any(
+        position is None
+        for _, position in _air_conditioning_window_positions(ac)
+    )
+
+
+def _air_conditioning_open_windows(ac: AirConditioningFlow) -> list[tuple[str, int]]:
+    return [
+        (window, position)
+        for window, position in _air_conditioning_window_positions(ac)
+        if position is not None and position > 20
+    ]
+
+
 def _any_defrost_window_open_over(defrost: DefrostFlow, threshold: int) -> bool:
     return any(
         value is not None and value > threshold
@@ -1961,6 +2790,17 @@ def _friendly_air_mode(
         "AUTO": "auto mode",
         None: "the requested mode",
     }[mode]
+
+
+def _friendly_reading_light_position(position: str | None) -> str:
+    return {
+        "ALL": "all",
+        "DRIVER": "the driver",
+        "PASSENGER": "the passenger",
+        "DRIVER_REAR": "the driver rear",
+        "PASSENGER_REAR": "the passenger rear",
+        None: "the requested",
+    }.get(position, "the requested")
 
 
 def _bounded_percentage(value: Any) -> int | None:
