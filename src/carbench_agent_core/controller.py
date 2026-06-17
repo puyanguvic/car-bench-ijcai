@@ -129,6 +129,18 @@ class NavigationFlow:
 
 
 @dataclass
+class HighBeamFlow:
+    active: bool = False
+    on: bool = True
+    exterior_lights_checked: bool = False
+    fog_lights_on: bool | None = None
+    confirmation_requested: bool = False
+    confirmed: bool = False
+    declined: bool = False
+    completed: bool = False
+
+
+@dataclass
 class ControllerState:
     runtime: RuntimeContext = field(default_factory=RuntimeContext)
     sunroof: SunroofFlow = field(default_factory=SunroofFlow)
@@ -137,6 +149,7 @@ class ControllerState:
     trunk: TrunkFlow = field(default_factory=TrunkFlow)
     air_circulation: AirCirculationFlow = field(default_factory=AirCirculationFlow)
     navigation: NavigationFlow = field(default_factory=NavigationFlow)
+    high_beam: HighBeamFlow = field(default_factory=HighBeamFlow)
     last_user_text: str = ""
 
 
@@ -182,6 +195,8 @@ class PolicyAwareController:
             return self._next_air_circulation_action(state, tool_index)
         if state.navigation.active:
             return self._next_navigation_action(state, tool_index)
+        if state.high_beam.active:
+            return self._next_high_beam_action(state, tool_index)
 
         return None
 
@@ -230,6 +245,17 @@ class PolicyAwareController:
             trunk.confirmed = True
             trunk.confirmation_requested = False
             return
+
+        high_beam = state.high_beam
+        if high_beam.confirmation_requested:
+            if _is_affirmative(lowered):
+                high_beam.confirmed = True
+                high_beam.confirmation_requested = False
+                return
+            if _is_negative(lowered):
+                high_beam.declined = True
+                high_beam.confirmation_requested = False
+                return
 
         if sunroof.active and sunroof.target_percentage is None:
             clarified = _extract_percentage(lowered, allow_standalone=True)
@@ -309,6 +335,11 @@ class PolicyAwareController:
                     destination_name=destination,
                     route_preference=_extract_route_preference(lowered),
                 )
+        elif _is_high_beam_request(lowered):
+            state.high_beam = HighBeamFlow(
+                active=True,
+                on=not _is_light_off_request(lowered),
+            )
 
     def _observe_tool_results(
         self, state: ControllerState, tool_results: list[dict[str, Any]]
@@ -391,6 +422,16 @@ class PolicyAwareController:
                 mode = result.get("mode")
                 if mode in {"FRESH_AIR", "RECIRCULATION", "AUTO"}:
                     state.air_circulation.mode = mode
+            elif name == "get_exterior_lights_status" and isinstance(result, dict):
+                state.high_beam.exterior_lights_checked = True
+                fog_lights = result.get("fog_lights")
+                if isinstance(fog_lights, bool):
+                    state.high_beam.fog_lights_on = fog_lights
+            elif name == "set_head_lights_high_beams" and isinstance(result, dict):
+                state.high_beam.completed = True
+                on_value = result.get("on")
+                if isinstance(on_value, bool):
+                    state.high_beam.on = on_value
             elif name == "get_location_id_by_location_name":
                 if isinstance(result, dict) and isinstance(result.get("id"), str):
                     state.navigation.destination_id = result["id"]
@@ -703,6 +744,66 @@ class PolicyAwareController:
             reason="air_circulation_set",
         )
 
+    def _next_high_beam_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        high_beam = state.high_beam
+
+        if high_beam.declined:
+            target = "on" if high_beam.on else "off"
+            state.high_beam = HighBeamFlow()
+            return NextAction.respond(
+                f"Okay, I won't set the high beam headlights to {target}.",
+                reason="high_beam_declined",
+            )
+
+        if high_beam.completed:
+            on = high_beam.on
+            state.high_beam = HighBeamFlow()
+            return NextAction.respond(
+                "Done, the high beam headlights are on."
+                if on
+                else "Done, the high beam headlights are off.",
+                reason="high_beam_done",
+            )
+
+        if not tool_index.has("set_head_lights_high_beams"):
+            return NextAction.respond(
+                "I can't change the high beam headlights because that control is unavailable right now.",
+                reason="high_beam_missing_tool",
+            )
+
+        if high_beam.on and not high_beam.exterior_lights_checked:
+            if not tool_index.has("get_exterior_lights_status"):
+                return NextAction.respond(
+                    "I can't safely turn on the high beams because the exterior light status check is unavailable right now.",
+                    reason="high_beam_missing_status_tool",
+                )
+            return NextAction.tool_call(
+                "get_exterior_lights_status",
+                reason="high_beam_status_check",
+            )
+
+        if high_beam.on and high_beam.fog_lights_on is True:
+            return NextAction.respond(
+                "I can't turn on the high beams while the fog lights are on, because that combination reduces visibility.",
+                reason="high_beam_fog_light_conflict",
+            )
+
+        if not high_beam.confirmed:
+            high_beam.confirmation_requested = True
+            target = "on" if high_beam.on else "off"
+            return NextAction.respond(
+                f"Please confirm: I will set the high beam headlights to {target}.",
+                reason="high_beam_confirmation",
+            )
+
+        return NextAction.tool_call(
+            "set_head_lights_high_beams",
+            {"on": high_beam.on},
+            reason="high_beam_set",
+        )
+
     def _next_navigation_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -890,7 +991,30 @@ def _is_ambient_light_request(text: str) -> bool:
 
 
 def _is_light_off_request(text: str) -> bool:
-    return _is_close_request(text) or "turn off" in text or "switch off" in text
+    return (
+        _is_close_request(text)
+        or "turn off" in text
+        or "switch off" in text
+        or "deactivate" in text
+    )
+
+
+def _is_high_beam_request(text: str) -> bool:
+    if not re.search(r"\bhigh[- ]beams?\b", text):
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "turn on",
+            "turn off",
+            "switch on",
+            "switch off",
+            "activate",
+            "deactivate",
+            "set",
+            "need",
+        )
+    )
 
 
 def _is_trunk_request(text: str) -> bool:
@@ -1235,6 +1359,15 @@ def _is_affirmative(text: str) -> bool:
         or "still want" in text
         or "proceed" in text
         or "do it" in text
+    )
+
+
+def _is_negative(text: str) -> bool:
+    text = text.strip().lower()
+    return bool(
+        re.search(r"\b(no|nope|nah|cancel|stop|decline|declined)\b", text)
+        or "don't" in text
+        or "do not" in text
     )
 
 
