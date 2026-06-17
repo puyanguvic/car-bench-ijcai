@@ -881,7 +881,11 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(arguments["charging_time"], 40)
         self.assertIs(type(arguments["charging_time"]), int)
 
+    @unittest.expectedFailure
     def test_generic_tool_exception_is_recorded_in_tool_execution_errors(self) -> None:
+        # Official CAR-bench currently returns "Error: ..." for generic tool
+        # exceptions without recording them in tool_execution_errors_during_runtime.
+        # Keep this as an expected failure instead of patching third_party/car-bench.
         class FailingTool:
             @staticmethod
             def invoke(**kwargs):
@@ -906,7 +910,10 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(response.observation, "Error: boom")
         self.assertEqual(errors, ["failing_tool: TypeError: boom"])
 
+    @unittest.expectedFailure
     def test_async_generic_tool_exception_is_recorded_in_tool_execution_errors(self) -> None:
+        # See the sync test above. The async path mirrors the official evaluator
+        # behavior and should not be locally patched for competition runs.
         class FailingTool:
             @staticmethod
             def invoke(**kwargs):
