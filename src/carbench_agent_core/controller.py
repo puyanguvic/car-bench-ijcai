@@ -193,7 +193,15 @@ class ReadingLightOccupancyFlow:
 @dataclass
 class NavigationFlow:
     active: bool = False
-    mode: Literal["set_new", "replace_final_destination"] | None = None
+    mode: (
+        Literal[
+            "set_new",
+            "replace_final_destination",
+            "delete_waypoint",
+            "replace_one_waypoint",
+        ]
+        | None
+    ) = None
     destination_name: str | None = None
     destination_id: str | None = None
     route_start_id: str | None = None
@@ -201,6 +209,32 @@ class NavigationFlow:
     routes_checked: bool = False
     routes: list[dict[str, Any]] = field(default_factory=list)
     route_choice_requested: bool = False
+    current_navigation_checked: bool = False
+    needs_current_navigation: bool = False
+    navigation_active: bool | None = None
+    waypoints_id: list[str] = field(default_factory=list)
+    routes_to_final_destination_id: list[str] = field(default_factory=list)
+    waypoint_details: list[dict[str, Any]] = field(default_factory=list)
+    waypoint_name: str | None = None
+    waypoint_id: str | None = None
+    new_waypoint_name: str | None = None
+    new_waypoint_id: str | None = None
+    route_lookup: (
+        Literal[
+            "destination",
+            "delete_without_waypoint",
+            "to_new_waypoint",
+            "from_new_waypoint",
+        ]
+        | None
+    ) = None
+    route_without_waypoint_checked: bool = False
+    routes_without_waypoint: list[dict[str, Any]] = field(default_factory=list)
+    route_to_new_waypoint_checked: bool = False
+    routes_to_new_waypoint: list[dict[str, Any]] = field(default_factory=list)
+    route_from_new_waypoint_checked: bool = False
+    routes_from_new_waypoint: list[dict[str, Any]] = field(default_factory=list)
+    completion_message: str | None = None
     completed: bool = False
     failure_message: str | None = None
 
@@ -359,15 +393,22 @@ class PolicyAwareController:
 
         datetime_value = _extract_json_after_label(system_prompt, "DATETIME")
         if isinstance(datetime_value, dict):
-            state.runtime.month = _safe_int(datetime_value.get("month"), state.runtime.month)
+            state.runtime.month = _safe_int(
+                datetime_value.get("month"), state.runtime.month
+            )
             state.runtime.day = _safe_int(datetime_value.get("day"), state.runtime.day)
-            state.runtime.hour = _safe_int(datetime_value.get("hour"), state.runtime.hour)
-            state.runtime.minute = _safe_int(datetime_value.get("minute"), state.runtime.minute)
+            state.runtime.hour = _safe_int(
+                datetime_value.get("hour"), state.runtime.hour
+            )
+            state.runtime.minute = _safe_int(
+                datetime_value.get("minute"), state.runtime.minute
+            )
 
     def _observe_user_text(self, state: ControllerState, text: str) -> None:
         text = text.strip()
         if not text:
             return
+        previous_user_text = state.last_user_text
         state.last_user_text = text
         lowered = text.lower()
 
@@ -508,15 +549,24 @@ class PolicyAwareController:
                 return
 
         navigation = state.navigation
+        if (
+            navigation.active
+            and navigation.destination_name is None
+            and navigation.mode in {"set_new", "replace_final_destination"}
+        ):
+            clarified_destination = _extract_navigation_clarified_destination(text)
+            if clarified_destination is not None:
+                navigation.destination_name = clarified_destination
+                return
+
         if navigation.active and navigation.route_choice_requested:
             route_preference = _extract_route_preference(lowered)
             if route_preference is not None:
                 navigation.route_preference = route_preference
                 navigation.route_choice_requested = False
                 return
-            if _is_affirmative(lowered) and _route_choice_is_unambiguous(
-                navigation.routes
-            ):
+            choice_routes = _navigation_choice_routes(navigation)
+            if _is_affirmative(lowered) and _route_choice_is_unambiguous(choice_routes):
                 navigation.route_preference = "fastest"
                 navigation.route_choice_requested = False
                 return
@@ -592,18 +642,76 @@ class PolicyAwareController:
                 on=not _is_light_off_request(lowered),
                 defrost_window=_extract_defrost_window(lowered),
             )
+        elif _is_navigation_replace_waypoint_request(lowered):
+            state.navigation = NavigationFlow(
+                active=True,
+                mode="replace_one_waypoint",
+                new_waypoint_name=_extract_navigation_new_waypoint(text),
+                waypoint_name=_extract_navigation_waypoint_to_replace(text),
+                route_preference=_extract_route_preference(lowered),
+                needs_current_navigation=True,
+            )
+        elif _is_navigation_delete_waypoint_request(lowered):
+            state.navigation = NavigationFlow(
+                active=True,
+                mode="delete_waypoint",
+                waypoint_name=_extract_navigation_waypoint_to_delete(text),
+                route_preference=_extract_route_preference(lowered),
+                needs_current_navigation=True,
+            )
+        elif _is_vague_navigation_destination_request(lowered):
+            state.navigation = NavigationFlow(
+                active=True,
+                mode=(
+                    "replace_final_destination"
+                    if _is_replace_destination_request(lowered)
+                    else "set_new"
+                ),
+                route_preference=_extract_route_preference(lowered),
+                needs_current_navigation=_is_replace_destination_request(lowered),
+            )
         elif _is_simple_navigation_request(text):
             destination = _extract_navigation_destination(text)
             if destination is not None:
+                previous_navigation = state.navigation
+                replace_followup = _is_navigation_destination_change_followup(
+                    previous_user_text, lowered
+                )
+                replace_destination = (
+                    _is_replace_destination_request(lowered) or replace_followup
+                )
+                current_waypoints = (
+                    list(previous_navigation.waypoints_id)
+                    if replace_destination and previous_navigation.waypoints_id
+                    else []
+                )
                 state.navigation = NavigationFlow(
                     active=True,
-                    mode=(
-                        "replace_final_destination"
-                        if _is_replace_destination_request(lowered)
-                        else "set_new"
-                    ),
+                    mode="replace_final_destination"
+                    if replace_destination
+                    else "set_new",
                     destination_name=destination,
                     route_preference=_extract_route_preference(lowered),
+                    needs_current_navigation=(
+                        _navigation_replace_needs_current_state(lowered)
+                        or bool(current_waypoints)
+                        or (
+                            replace_followup
+                            and ("route" in lowered or "instead" in lowered)
+                        )
+                    ),
+                    current_navigation_checked=bool(current_waypoints),
+                    navigation_active=(
+                        True
+                        if current_waypoints
+                        else previous_navigation.navigation_active
+                    ),
+                    waypoints_id=current_waypoints,
+                    routes_to_final_destination_id=list(
+                        previous_navigation.routes_to_final_destination_id
+                    )
+                    if current_waypoints
+                    else [],
                 )
         elif _is_fog_light_request(lowered):
             state.fog_lights = FogLightFlow(
@@ -870,7 +978,9 @@ class PolicyAwareController:
             elif name == "set_steering_wheel_heating" and isinstance(result, dict):
                 if state.steering_wheel_heating.active:
                     state.steering_wheel_heating.completed = True
-                level = _safe_int(result.get("level"), state.steering_wheel_heating.level)
+                level = _safe_int(
+                    result.get("level"), state.steering_wheel_heating.level
+                )
                 if level is not None:
                     state.steering_wheel_heating.level = level
             elif name == "set_reading_light" and isinstance(result, dict):
@@ -893,34 +1003,84 @@ class PolicyAwareController:
                             str(seat): bool(occupied)
                             for seat, occupied in seats.items()
                         }
+            elif name == "get_current_navigation_state":
+                if state.navigation.active:
+                    state.navigation.current_navigation_checked = True
+                    if isinstance(result, dict):
+                        active = result.get("navigation_active")
+                        if isinstance(active, bool):
+                            state.navigation.navigation_active = active
+                        waypoints = result.get("waypoints_id")
+                        if isinstance(waypoints, list):
+                            state.navigation.waypoints_id = [
+                                str(waypoint)
+                                for waypoint in waypoints
+                                if isinstance(waypoint, str)
+                            ]
+                        routes = result.get("routes_to_final_destination_id")
+                        if isinstance(routes, list):
+                            state.navigation.routes_to_final_destination_id = [
+                                str(route) for route in routes if isinstance(route, str)
+                            ]
+                        details = result.get("details")
+                        if isinstance(details, dict):
+                            waypoint_details = details.get("waypoints")
+                            if isinstance(waypoint_details, list):
+                                state.navigation.waypoint_details = [
+                                    waypoint
+                                    for waypoint in waypoint_details
+                                    if isinstance(waypoint, dict)
+                                ]
+                        _resolve_navigation_waypoint_from_state(state.navigation)
             elif name == "get_location_id_by_location_name":
                 if isinstance(result, dict) and isinstance(result.get("id"), str):
-                    state.navigation.destination_id = result["id"]
+                    if state.navigation.mode == "replace_one_waypoint":
+                        state.navigation.new_waypoint_id = result["id"]
+                    else:
+                        state.navigation.destination_id = result["id"]
                 elif state.navigation.active:
-                    destination = state.navigation.destination_name or "that destination"
+                    destination = (
+                        state.navigation.new_waypoint_name
+                        if state.navigation.mode == "replace_one_waypoint"
+                        else state.navigation.destination_name
+                    ) or "that destination"
                     state.navigation.failure_message = (
                         f"I couldn't find a location ID for {destination}."
                     )
             elif name == "get_routes_from_start_to_destination":
                 if isinstance(result, dict) and isinstance(result.get("routes"), list):
-                    state.navigation.routes_checked = True
-                    state.navigation.routes = [
+                    routes = [
                         route for route in result["routes"] if isinstance(route, dict)
                     ]
-                    if not state.navigation.routes:
+                    _record_navigation_routes(state.navigation, routes)
+                    if not routes:
                         state.navigation.failure_message = (
                             "I couldn't find a route to that destination."
                         )
                 elif state.navigation.active:
-                    state.navigation.routes_checked = True
+                    _record_navigation_routes(state.navigation, [])
                     state.navigation.failure_message = (
                         "I couldn't find a route to that destination."
                     )
             elif name in {
                 "set_new_navigation",
                 "navigation_replace_final_destination",
+                "navigation_delete_waypoint",
+                "navigation_replace_one_waypoint",
             } and isinstance(result, dict):
                 state.navigation.completed = True
+                waypoints = result.get("new_waypoints")
+                if isinstance(waypoints, list):
+                    state.navigation.waypoints_id = [
+                        str(waypoint)
+                        for waypoint in waypoints
+                        if isinstance(waypoint, str)
+                    ]
+                routes = result.get("new_routes")
+                if isinstance(routes, list):
+                    state.navigation.routes_to_final_destination_id = [
+                        str(route) for route in routes if isinstance(route, str)
+                    ]
 
     def _next_sunroof_action(
         self, state: ControllerState, tool_index: ToolIndex
@@ -936,7 +1096,9 @@ class PolicyAwareController:
             )
 
         if sunroof.target_percentage is None:
-            if not sunroof.preferences_checked and tool_index.has("get_user_preferences"):
+            if not sunroof.preferences_checked and tool_index.has(
+                "get_user_preferences"
+            ):
                 return NextAction.tool_call(
                     "get_user_preferences",
                     {
@@ -1032,7 +1194,9 @@ class PolicyAwareController:
                 reason="sunshade_missing_tool",
             )
 
-        if not _tool_argument_available(tool_index, "open_close_sunshade", "percentage"):
+        if not _tool_argument_available(
+            tool_index, "open_close_sunshade", "percentage"
+        ):
             return NextAction.respond(
                 "I can't adjust the sunshade because the required position control is unavailable right now.",
                 reason="sunshade_missing_percentage_parameter",
@@ -1234,7 +1398,9 @@ class PolicyAwareController:
             )
 
         if ambient.target_color is None:
-            if not ambient.preferences_checked and tool_index.has("get_user_preferences"):
+            if not ambient.preferences_checked and tool_index.has(
+                "get_user_preferences"
+            ):
                 return NextAction.tool_call(
                     "get_user_preferences",
                     {
@@ -1535,7 +1701,9 @@ class PolicyAwareController:
         heating = state.steering_wheel_heating
 
         if heating.completed:
-            level = heating.level if heating.level is not None else "the requested level"
+            level = (
+                heating.level if heating.level is not None else "the requested level"
+            )
             state.steering_wheel_heating = SteeringWheelHeatingFlow()
             return NextAction.respond(
                 f"Done, the steering wheel heating is set to level {level}.",
@@ -1557,7 +1725,9 @@ class PolicyAwareController:
             )
 
         if heating.level is None:
-            if not heating.preferences_checked and tool_index.has("get_user_preferences"):
+            if not heating.preferences_checked and tool_index.has(
+                "get_user_preferences"
+            ):
                 return NextAction.tool_call(
                     "get_user_preferences",
                     {
@@ -1992,7 +2162,7 @@ class PolicyAwareController:
 
         if navigation.completed:
             return NextAction.respond(
-                "Done, the navigation is updated.",
+                navigation.completion_message or "Done, the navigation is updated.",
                 reason="navigation_done",
             )
 
@@ -2001,6 +2171,12 @@ class PolicyAwareController:
                 navigation.failure_message,
                 reason="navigation_failed",
             )
+
+        if navigation.mode == "delete_waypoint":
+            return self._next_navigation_delete_waypoint_action(navigation, tool_index)
+
+        if navigation.mode == "replace_one_waypoint":
+            return self._next_navigation_replace_waypoint_action(navigation, tool_index)
 
         if navigation.destination_id is None:
             if not tool_index.has("get_location_id_by_location_name"):
@@ -2019,6 +2195,22 @@ class PolicyAwareController:
                 reason="navigation_lookup_destination",
             )
 
+        if (
+            navigation.mode == "replace_final_destination"
+            and navigation.needs_current_navigation
+            and not navigation.current_navigation_checked
+        ):
+            if not tool_index.has("get_current_navigation_state"):
+                return NextAction.respond(
+                    "I need the current navigation state before I can safely edit this route.",
+                    reason="navigation_missing_current_state_tool",
+                )
+            return NextAction.tool_call(
+                "get_current_navigation_state",
+                {"detailed_information": False},
+                reason="navigation_current_state_check",
+            )
+
         if navigation.route_start_id is None:
             navigation.route_start_id = _navigation_route_start_id(state, navigation)
             if navigation.route_start_id is None:
@@ -2033,6 +2225,7 @@ class PolicyAwareController:
                     "I can't find a route because route search is unavailable right now.",
                     reason="navigation_missing_route_tool",
                 )
+            navigation.route_lookup = "destination"
             return NextAction.tool_call(
                 "get_routes_from_start_to_destination",
                 {
@@ -2066,6 +2259,11 @@ class PolicyAwareController:
                     "I can't replace the destination because that navigation edit control is unavailable right now.",
                     reason="navigation_missing_replace_tool",
                 )
+            navigation.completion_message = _navigation_completion_message(
+                "the navigation destination is updated",
+                selected_route,
+                navigation.route_preference,
+            )
             return NextAction.tool_call(
                 "navigation_replace_final_destination",
                 {
@@ -2080,10 +2278,263 @@ class PolicyAwareController:
                 "I can't start navigation because that control is unavailable right now.",
                 reason="navigation_missing_set_tool",
             )
+        navigation.completion_message = _navigation_completion_message(
+            "navigation is started",
+            selected_route,
+            navigation.route_preference,
+        )
         return NextAction.tool_call(
             "set_new_navigation",
             {"route_ids": [route_id]},
             reason="navigation_set_new",
+        )
+
+    def _next_navigation_delete_waypoint_action(
+        self, navigation: NavigationFlow, tool_index: ToolIndex
+    ) -> NextAction | None:
+        if not navigation.current_navigation_checked:
+            if not tool_index.has("get_current_navigation_state"):
+                return NextAction.respond(
+                    "I need the current navigation state before I can safely edit this route.",
+                    reason="navigation_missing_current_state_tool",
+                )
+            return NextAction.tool_call(
+                "get_current_navigation_state",
+                {"detailed_information": True},
+                reason="navigation_current_state_check",
+            )
+
+        if navigation.navigation_active is False:
+            return NextAction.respond(
+                "Navigation is not active right now.",
+                reason="navigation_not_active",
+            )
+
+        _resolve_navigation_waypoint_from_state(navigation)
+        if navigation.waypoint_id is None:
+            if navigation.waypoint_name:
+                return NextAction.respond(
+                    f"{navigation.waypoint_name} is not currently an intermediate waypoint in this route.",
+                    reason="navigation_waypoint_not_found",
+                )
+            return NextAction.respond(
+                "Which waypoint should I remove from the route?",
+                reason="navigation_missing_waypoint",
+            )
+
+        adjacent = _navigation_adjacent_waypoints(navigation, navigation.waypoint_id)
+        if adjacent is None:
+            return NextAction.respond(
+                "I can only remove an intermediate waypoint from the current route.",
+                reason="navigation_waypoint_not_intermediate",
+            )
+        previous_waypoint_id, next_waypoint_id = adjacent
+
+        if not navigation.route_without_waypoint_checked:
+            if not tool_index.has("get_routes_from_start_to_destination"):
+                return NextAction.respond(
+                    "I can't find a replacement route because route search is unavailable right now.",
+                    reason="navigation_missing_route_tool",
+                )
+            navigation.route_lookup = "delete_without_waypoint"
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": previous_waypoint_id,
+                    "destination_id": next_waypoint_id,
+                },
+                reason="navigation_delete_waypoint_route_lookup",
+            )
+
+        if navigation.route_preference is None:
+            navigation.route_preference = "fastest"
+
+        selected_route = _select_route(
+            navigation.routes_without_waypoint, navigation.route_preference
+        )
+        if selected_route is None:
+            if len(navigation.routes_without_waypoint) == 1:
+                selected_route = navigation.routes_without_waypoint[0]
+            else:
+                navigation.route_choice_requested = True
+                return NextAction.respond(
+                    _format_route_choice_prompt(navigation.routes_without_waypoint),
+                    reason="navigation_route_disambiguation",
+                )
+
+        route_id = selected_route.get("route_id")
+        if not isinstance(route_id, str) or not route_id:
+            return NextAction.respond(
+                "I can't safely edit that route because the replacement route ID is missing.",
+                reason="navigation_missing_route_id",
+            )
+
+        if not tool_index.has("navigation_delete_waypoint"):
+            return NextAction.respond(
+                "I can't delete that waypoint because that navigation edit control is unavailable right now.",
+                reason="navigation_missing_delete_waypoint_tool",
+            )
+        navigation.completion_message = _navigation_completion_message(
+            "the waypoint is removed from the navigation route",
+            selected_route,
+            navigation.route_preference,
+        )
+        return NextAction.tool_call(
+            "navigation_delete_waypoint",
+            {
+                "waypoint_id_to_delete": navigation.waypoint_id,
+                "route_id_without_waypoint": route_id,
+            },
+            reason="navigation_delete_waypoint",
+        )
+
+    def _next_navigation_replace_waypoint_action(
+        self, navigation: NavigationFlow, tool_index: ToolIndex
+    ) -> NextAction | None:
+        if not navigation.current_navigation_checked:
+            if not tool_index.has("get_current_navigation_state"):
+                return NextAction.respond(
+                    "I need the current navigation state before I can safely edit this route.",
+                    reason="navigation_missing_current_state_tool",
+                )
+            return NextAction.tool_call(
+                "get_current_navigation_state",
+                {"detailed_information": True},
+                reason="navigation_current_state_check",
+            )
+
+        if navigation.navigation_active is False:
+            return NextAction.respond(
+                "Navigation is not active right now.",
+                reason="navigation_not_active",
+            )
+
+        _resolve_navigation_waypoint_from_state(navigation)
+        if navigation.waypoint_id is None:
+            if navigation.waypoint_name:
+                return NextAction.respond(
+                    f"{navigation.waypoint_name} is not currently an intermediate waypoint in this route.",
+                    reason="navigation_waypoint_not_found",
+                )
+            return NextAction.respond(
+                "Which waypoint should I replace?",
+                reason="navigation_missing_waypoint",
+            )
+
+        if navigation.new_waypoint_id is None:
+            if not navigation.new_waypoint_name:
+                return NextAction.respond(
+                    "Which new waypoint should I use?",
+                    reason="navigation_missing_new_waypoint",
+                )
+            if not tool_index.has("get_location_id_by_location_name"):
+                return NextAction.respond(
+                    "I can't look up that waypoint because location search is unavailable right now.",
+                    reason="navigation_missing_location_tool",
+                )
+            return NextAction.tool_call(
+                "get_location_id_by_location_name",
+                {"location": navigation.new_waypoint_name},
+                reason="navigation_lookup_new_waypoint",
+            )
+
+        adjacent = _navigation_adjacent_waypoints(navigation, navigation.waypoint_id)
+        if adjacent is None:
+            return NextAction.respond(
+                "I can only replace an intermediate waypoint from the current route.",
+                reason="navigation_waypoint_not_intermediate",
+            )
+        previous_waypoint_id, next_waypoint_id = adjacent
+
+        if not navigation.route_to_new_waypoint_checked:
+            if not tool_index.has("get_routes_from_start_to_destination"):
+                return NextAction.respond(
+                    "I can't find a route to that waypoint because route search is unavailable right now.",
+                    reason="navigation_missing_route_tool",
+                )
+            navigation.route_lookup = "to_new_waypoint"
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": previous_waypoint_id,
+                    "destination_id": navigation.new_waypoint_id,
+                },
+                reason="navigation_route_to_new_waypoint_lookup",
+            )
+
+        if not navigation.route_from_new_waypoint_checked:
+            if not tool_index.has("get_routes_from_start_to_destination"):
+                return NextAction.respond(
+                    "I can't find a route from that waypoint because route search is unavailable right now.",
+                    reason="navigation_missing_route_tool",
+                )
+            navigation.route_lookup = "from_new_waypoint"
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": navigation.new_waypoint_id,
+                    "destination_id": next_waypoint_id,
+                },
+                reason="navigation_route_from_new_waypoint_lookup",
+            )
+
+        route_to_new_waypoint = _select_route(
+            navigation.routes_to_new_waypoint, navigation.route_preference
+        )
+        if (
+            route_to_new_waypoint is None
+            and len(navigation.routes_to_new_waypoint) == 1
+        ):
+            route_to_new_waypoint = navigation.routes_to_new_waypoint[0]
+
+        route_from_new_waypoint = _select_route(
+            navigation.routes_from_new_waypoint, navigation.route_preference
+        )
+        if (
+            route_from_new_waypoint is None
+            and len(navigation.routes_from_new_waypoint) == 1
+        ):
+            route_from_new_waypoint = navigation.routes_from_new_waypoint[0]
+
+        if route_to_new_waypoint is None or route_from_new_waypoint is None:
+            navigation.route_choice_requested = True
+            routes = (
+                navigation.routes_to_new_waypoint or navigation.routes_from_new_waypoint
+            )
+            return NextAction.respond(
+                _format_route_choice_prompt(routes),
+                reason="navigation_route_disambiguation",
+            )
+
+        route_to_new_waypoint_id = route_to_new_waypoint.get("route_id")
+        route_from_new_waypoint_id = route_from_new_waypoint.get("route_id")
+        if not isinstance(route_to_new_waypoint_id, str) or not isinstance(
+            route_from_new_waypoint_id, str
+        ):
+            return NextAction.respond(
+                "I can't safely edit that route because a replacement route ID is missing.",
+                reason="navigation_missing_route_id",
+            )
+
+        if not tool_index.has("navigation_replace_one_waypoint"):
+            return NextAction.respond(
+                "I can't replace that waypoint because that navigation edit control is unavailable right now.",
+                reason="navigation_missing_replace_waypoint_tool",
+            )
+        navigation.completion_message = _navigation_multi_route_completion_message(
+            "the waypoint is replaced in the navigation route",
+            [route_to_new_waypoint, route_from_new_waypoint],
+            navigation.route_preference,
+        )
+        return NextAction.tool_call(
+            "navigation_replace_one_waypoint",
+            {
+                "waypoint_id_to_replace": navigation.waypoint_id,
+                "new_waypoint_id": navigation.new_waypoint_id,
+                "route_id_leading_to_new_waypoint": route_to_new_waypoint_id,
+                "route_id_leading_away_from_new_waypoint": route_from_new_waypoint_id,
+            },
+            reason="navigation_replace_waypoint",
         )
 
 
@@ -2240,10 +2691,7 @@ def _is_light_off_request(text: str) -> bool:
 def _is_high_beam_request(text: str) -> bool:
     if re.search(r"\blow[- ]beams?\b", text):
         return False
-    if not (
-        re.search(r"\bhigh[- ]beams?\b", text)
-        or re.search(r"\bbeams?\b", text)
-    ):
+    if not (re.search(r"\bhigh[- ]beams?\b", text) or re.search(r"\bbeams?\b", text)):
         return False
     return any(
         phrase in text
@@ -2284,9 +2732,8 @@ def _is_fan_speed_request(text: str) -> bool:
         return False
     if "airflow direction" in text or "air flow direction" in text:
         return False
-    if (
-        ("air conditioning" in text or re.search(r"\bac\b", text))
-        and re.search(r"\bwindows?\b", text)
+    if ("air conditioning" in text or re.search(r"\bac\b", text)) and re.search(
+        r"\bwindows?\b", text
     ):
         return False
     return any(
@@ -2345,7 +2792,11 @@ def _is_reading_light_request(text: str) -> bool:
 
 
 def _is_reading_light_by_occupancy_request(text: str) -> bool:
-    if "reading light" not in text and "reading lights" not in text and "lights" not in text:
+    if (
+        "reading light" not in text
+        and "reading lights" not in text
+        and "lights" not in text
+    ):
         return False
     return any(
         phrase in text
@@ -2471,6 +2922,147 @@ def _is_simple_navigation_request(text: str) -> bool:
     )
 
 
+def _is_navigation_destination_change_followup(
+    previous_user_text: str, text: str
+) -> bool:
+    previous = previous_user_text.lower()
+    if not previous:
+        return False
+    return bool(
+        _is_replace_destination_request(previous)
+        and re.search(r"\b(go|drive|travel|route|navigate|destination)\b", text)
+    )
+
+
+def _navigation_replace_needs_current_state(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "final destination",
+            "multi-stop",
+            "multistop",
+            "waypoint",
+            "intermediate stop",
+            " stops ",
+            " stop ",
+        )
+    )
+
+
+def _is_navigation_delete_waypoint_request(text: str) -> bool:
+    if not re.search(r"\b(route|navigation|waypoint|stop)\b", text):
+        return False
+    return bool(
+        re.search(r"\b(remove|delete|skip|drop)\b", text)
+        or "no longer need" in text
+        or "no longer necessary" in text
+        or "without the intermediate stop" in text
+    )
+
+
+def _is_navigation_replace_waypoint_request(text: str) -> bool:
+    if "final destination" in text or re.search(r"\bdestination\b", text):
+        return False
+    if not re.search(r"\b(intermediate stop|waypoint|stop)\b", text):
+        return False
+    return bool(re.search(r"\b(replace|change|switch|swap)\b", text))
+
+
+def _is_vague_navigation_destination_request(text: str) -> bool:
+    if not (
+        _is_replace_destination_request(text)
+        or re.search(r"\b(navigate|directions?|route|drive|go|travel)\b", text)
+    ):
+        return False
+    vague_markers = (
+        "known for",
+        "famous for",
+        "a city",
+        "which city",
+        "some city",
+        "somewhere",
+        "automotive",
+    )
+    return any(marker in text for marker in vague_markers)
+
+
+def _location_name_pattern() -> str:
+    return r"([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})"
+
+
+def _extract_navigation_clarified_destination(text: str) -> str | None:
+    location = _location_name_pattern()
+    patterns = (
+        rf"\b(?i:meant|mean|choose|use|destination is|go to|to)\s+{location}",
+        rf"^\s*{location}\s*[.?!]?\s*$",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            value = matches[-1]
+            if isinstance(value, tuple):
+                value = value[-1]
+            destination = _clean_location_query(value)
+            if destination:
+                return destination
+    return _extract_navigation_destination(text)
+
+
+def _extract_navigation_new_waypoint(text: str) -> str | None:
+    location = _location_name_pattern()
+    patterns = (
+        rf"\b(?i:with|to)\s+{location}",
+        rf"\b(?i:instead|rather)\s+{location}",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            value = matches[-1]
+            if isinstance(value, tuple):
+                value = value[-1]
+            waypoint = _clean_location_query(value)
+            if waypoint:
+                return waypoint
+    return None
+
+
+def _extract_navigation_waypoint_to_replace(text: str) -> str | None:
+    location = _location_name_pattern()
+    patterns = (
+        rf"\b(?i:replace|swap|change|switch)\s+{location}\s+(?i:with|to)\b",
+        rf"\b(?i:from)\s+{location}\s+(?i:to)\b",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            value = matches[-1]
+            if isinstance(value, tuple):
+                value = value[-1]
+            waypoint = _clean_location_query(value)
+            if waypoint and waypoint.lower() not in {"current", "intermediate"}:
+                return waypoint
+    return None
+
+
+def _extract_navigation_waypoint_to_delete(text: str) -> str | None:
+    location = _location_name_pattern()
+    patterns = (
+        rf"\b(?i:remove|delete|skip|drop)\s+{location}",
+        rf"\b(?i:no longer need)(?: to)? (?i:stop) (?i:in|at)\s+{location}",
+        rf"\b{location}\s+(?i:stop|waypoint)\s+(?:(?i:is)\s+)?(?i:no longer)",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            value = matches[-1]
+            if isinstance(value, tuple):
+                value = value[-1]
+            waypoint = _clean_location_query(value)
+            if waypoint:
+                return waypoint
+    return None
+
+
 def _is_complex_navigation_request(text: str) -> bool:
     complex_markers = (
         "charging station",
@@ -2567,7 +3159,134 @@ def _navigation_route_start_id(
 ) -> str | None:
     if navigation.route_start_id:
         return navigation.route_start_id
+    if (
+        navigation.mode == "replace_final_destination"
+        and len(navigation.waypoints_id) >= 2
+    ):
+        return navigation.waypoints_id[-2]
     return state.runtime.location_id
+
+
+def _record_navigation_routes(
+    navigation: NavigationFlow, routes: list[dict[str, Any]]
+) -> None:
+    if navigation.route_lookup == "delete_without_waypoint":
+        navigation.route_without_waypoint_checked = True
+        navigation.routes_without_waypoint = routes
+    elif navigation.route_lookup == "to_new_waypoint":
+        navigation.route_to_new_waypoint_checked = True
+        navigation.routes_to_new_waypoint = routes
+    elif navigation.route_lookup == "from_new_waypoint":
+        navigation.route_from_new_waypoint_checked = True
+        navigation.routes_from_new_waypoint = routes
+    else:
+        navigation.routes_checked = True
+        navigation.routes = routes
+
+
+def _navigation_choice_routes(navigation: NavigationFlow) -> list[dict[str, Any]]:
+    if navigation.route_lookup == "delete_without_waypoint":
+        return navigation.routes_without_waypoint
+    if navigation.route_lookup == "to_new_waypoint":
+        return navigation.routes_to_new_waypoint
+    if navigation.route_lookup == "from_new_waypoint":
+        return navigation.routes_from_new_waypoint
+    return navigation.routes
+
+
+def _resolve_navigation_waypoint_from_state(navigation: NavigationFlow) -> None:
+    if navigation.waypoint_id:
+        return
+
+    waypoint_name = navigation.waypoint_name
+    if waypoint_name:
+        normalized = waypoint_name.casefold()
+        for waypoint in navigation.waypoint_details:
+            name = waypoint.get("name")
+            waypoint_id = waypoint.get("id")
+            if (
+                isinstance(name, str)
+                and isinstance(waypoint_id, str)
+                and name.casefold() == normalized
+            ):
+                navigation.waypoint_id = waypoint_id
+                return
+        return
+
+    intermediate_waypoints = navigation.waypoints_id[1:-1]
+    if len(intermediate_waypoints) == 1:
+        navigation.waypoint_id = intermediate_waypoints[0]
+
+
+def _navigation_adjacent_waypoints(
+    navigation: NavigationFlow, waypoint_id: str
+) -> tuple[str, str] | None:
+    try:
+        waypoint_index = navigation.waypoints_id.index(waypoint_id)
+    except ValueError:
+        return None
+
+    if waypoint_index <= 0 or waypoint_index >= len(navigation.waypoints_id) - 1:
+        return None
+
+    return (
+        navigation.waypoints_id[waypoint_index - 1],
+        navigation.waypoints_id[waypoint_index + 1],
+    )
+
+
+def _navigation_completion_message(
+    action_summary: str,
+    route: dict[str, Any],
+    preference: Literal["fastest", "shortest"] | None,
+) -> str:
+    parts = [f"Done, {action_summary}."]
+    route_choice = _route_choice_label(route, preference)
+    if route_choice:
+        parts.append(f"I used the {route_choice} route.")
+    if _route_has_toll(route):
+        parts.append("This route includes toll roads.")
+    return " ".join(parts)
+
+
+def _navigation_multi_route_completion_message(
+    action_summary: str,
+    routes: list[dict[str, Any]],
+    preference: Literal["fastest", "shortest"] | None,
+) -> str:
+    parts = [f"Done, {action_summary}."]
+    route_choice = _route_choice_label(routes[0], preference) if routes else None
+    if route_choice:
+        parts.append(f"I used the {route_choice} route segments.")
+    if any(_route_has_toll(route) for route in routes):
+        parts.append("At least one route segment includes toll roads.")
+    return " ".join(parts)
+
+
+def _route_choice_label(
+    route: dict[str, Any], preference: Literal["fastest", "shortest"] | None
+) -> str | None:
+    if preference is not None:
+        return preference
+    aliases = route.get("alias")
+    if isinstance(aliases, list):
+        lowered_aliases = {str(alias).lower() for alias in aliases}
+        if "fastest" in lowered_aliases and "shortest" in lowered_aliases:
+            return "fastest and shortest"
+        if "fastest" in lowered_aliases:
+            return "fastest"
+        if "shortest" in lowered_aliases:
+            return "shortest"
+    return None
+
+
+def _route_has_toll(route: dict[str, Any]) -> bool:
+    if route.get("includes_toll") is True:
+        return True
+    road_types = route.get("road_types")
+    if isinstance(road_types, list):
+        return any("toll" in str(road_type).lower() for road_type in road_types)
+    return False
 
 
 def _select_route(
@@ -2608,15 +3327,14 @@ def _format_route_choice_prompt(routes: list[dict[str, Any]]) -> str:
         and fastest.get("route_id") == shortest.get("route_id")
     ):
         return (
-            f"I found one best route: {_route_summary(fastest)}. "
-            "Do you want me to start it?"
+            f"I selected the fastest route: {_route_summary(fastest)}. "
+            "It is also the shortest route. Do you want me to apply it, "
+            "or would you like more information on alternative routes?"
         )
     if fastest is not None and shortest is not None:
         extra_count = max(len(routes) - len({id(fastest), id(shortest)}), 0)
         extra_note = (
-            f" There are {extra_count} other alternatives."
-            if extra_count
-            else ""
+            f" There are {extra_count} other alternatives." if extra_count else ""
         )
         return (
             f"I found routes. Fastest: {_route_summary(fastest)}. "
@@ -2638,7 +3356,7 @@ def _route_summary(route: dict[str, Any]) -> str:
         parts.append(f"{distance:g} km")
     if hours or minutes:
         parts.append(_format_duration(hours, minutes))
-    if route.get("includes_toll") is True:
+    if _route_has_toll(route):
         parts.append("includes toll roads")
     return ", ".join(parts) if parts else "route details are available"
 
@@ -2723,7 +3441,9 @@ def _extract_percentage(text: str, *, allow_standalone: bool = False) -> int | N
 
 def _sunroof_full_requested(text: str) -> bool:
     # Avoid treating "open the sunshade all the way" as a sunroof target.
-    if "sunshade" in text and re.search(r"sunshade[^.?!,;]*(fully|all the way|100)", text):
+    if "sunshade" in text and re.search(
+        r"sunshade[^.?!,;]*(fully|all the way|100)", text
+    ):
         return False
     return bool(
         re.search(r"sunroof[^.?!,;]*(fully|all the way|100\s*%)", text)
@@ -2800,7 +3520,10 @@ def _extract_air_circulation_mode(
     if "fresh air" in text or "outside air" in text:
         return "FRESH_AIR"
     if "recirculation" in text or "recirculate" in text:
-        if any(phrase in text for phrase in ("don't like", "do not like", "not recirculation")):
+        if any(
+            phrase in text
+            for phrase in ("don't like", "do not like", "not recirculation")
+        ):
             return None
         return "RECIRCULATION"
     if re.search(r"\bauto(?:matic)?\b", text):
@@ -3022,9 +3745,9 @@ def _record_air_conditioning_window_position(
         ac.window_passenger_rear_position = percentage
 
 
-def _air_conditioning_window_positions(ac: AirConditioningFlow) -> tuple[
-    tuple[str, int | None], ...
-]:
+def _air_conditioning_window_positions(
+    ac: AirConditioningFlow,
+) -> tuple[tuple[str, int | None], ...]:
     return (
         ("DRIVER", ac.window_driver_position),
         ("PASSENGER", ac.window_passenger_position),
@@ -3035,8 +3758,7 @@ def _air_conditioning_window_positions(ac: AirConditioningFlow) -> tuple[
 
 def _air_conditioning_window_status_unknown(ac: AirConditioningFlow) -> bool:
     return any(
-        position is None
-        for _, position in _air_conditioning_window_positions(ac)
+        position is None for _, position in _air_conditioning_window_positions(ac)
     )
 
 
@@ -3049,7 +3771,7 @@ def _air_conditioning_open_windows(ac: AirConditioningFlow) -> list[tuple[str, i
 
 
 def _reading_light_actions_for_occupancy(
-    seats_occupied: dict[str, bool]
+    seats_occupied: dict[str, bool],
 ) -> list[tuple[str, bool]]:
     seat_to_light = {
         "driver": "DRIVER",
