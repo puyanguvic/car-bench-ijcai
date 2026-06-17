@@ -6,35 +6,119 @@ This is the agent being tested. It:
 2. Decides which tool to call or how to respond
 3. Returns responses in the expected JSON format wrapped in <json>...</json> tags
 """
-import argparse
 import json
-import os
 import time
 from pathlib import Path
 import sys
-import uvicorn
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
-from a2a.server.tasks import TaskUpdater
-from a2a.helpers.proto_helpers import new_message, new_text_part, new_data_part, new_task_from_user_message
-from a2a.types import Role, TaskState
+from a2a.helpers.proto_helpers import new_message, new_text_part, new_data_part
+from a2a.types import Role
 from google.protobuf.json_format import MessageToDict
 from litellm import completion
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from logging_utils import configure_logger
+from carbench_agent_core import NextAction, PolicyAwareController, ToolIndex
+from carbench_agent_core.prompting import model_messages_with_competition_prompt
+from carbench_agent_core.tool_index import parse_tool_arguments
 from tool_call_types import ToolCall, ToolCallsData
 from turn_metrics import TURN_METRICS_KEY, PROMPT_TOKENS, COMPLETION_TOKENS, COST, MODEL, THINKING_TOKENS, NUM_LLM_CALLS, AVG_LLM_CALL_TIME_MS, NUM_PASSES
 sys.path.pop(0)
 
 logger = configure_logger(role="agent_under_test", context="-")
 
-SYSTEM_PROMPT = """You are a helpful car voice assistant. Follow the policy and tool instructions provided."""
+
+def _assistant_content_from_next_action(action: NextAction) -> dict:
+    if action.action == "respond":
+        return {"content": action.content}
+
+    tool_calls = []
+    for tool_call in action.tool_calls:
+        call_id = f"call_{uuid4().hex[:12]}"
+        arguments = tool_call.get("arguments") or {}
+        tool_calls.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_call["tool_name"],
+                    "arguments": json.dumps(arguments, separators=(",", ":")),
+                },
+            }
+        )
+    return {"content": None, "tool_calls": tool_calls}
+
+
+def _parts_from_assistant_content(assistant_content: dict) -> list:
+    parts = []
+
+    if assistant_content.get("content"):
+        parts.append(new_text_part(assistant_content["content"]))
+
+    if assistant_content.get("tool_calls"):
+        tool_calls_list = []
+        for tc in assistant_content["tool_calls"]:
+            arguments = parse_tool_arguments(tc["function"].get("arguments"))
+            if arguments is None:
+                arguments = {}
+            tool_calls_list.append(
+                ToolCall(
+                    tool_name=tc["function"]["name"],
+                    arguments=arguments,
+                )
+            )
+        parts.append(new_data_part(ToolCallsData(tool_calls=tool_calls_list).model_dump()))
+
+    if not parts:
+        parts.append(new_text_part(assistant_content.get("content", "") or ""))
+
+    return parts
+
+
+def _validated_assistant_content(
+    assistant_content: dict,
+    *,
+    tool_index: ToolIndex,
+) -> dict:
+    tool_calls = assistant_content.get("tool_calls")
+    if not tool_calls:
+        return {"content": _clean_user_content(assistant_content.get("content") or "")}
+
+    validated_calls = []
+    for tc in tool_calls:
+        function = tc.get("function") or {}
+        name = function.get("name")
+        arguments = parse_tool_arguments(function.get("arguments"))
+        if not isinstance(name, str) or not name:
+            return {"content": "I can't safely use that tool because the tool name was malformed."}
+        if arguments is None:
+            return {"content": f"I can't safely use {name} because the tool arguments were malformed."}
+        validation_error = tool_index.validate_call(name, arguments)
+        if validation_error:
+            return {"content": validation_error}
+        validated_calls.append(
+            {
+                "id": tc.get("id") or f"call_{uuid4().hex[:12]}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, separators=(",", ":")),
+                },
+            }
+        )
+
+    return {"content": None, "tool_calls": validated_calls}
+
+
+def _clean_user_content(content: str) -> str:
+    content = content.replace("\u200b", "").replace("\xa0", " ")
+    return "\n".join(line.strip() for line in content.splitlines() if line.strip())
 
 
 class CARBenchAgentExecutor(AgentExecutor):
@@ -50,6 +134,7 @@ class CARBenchAgentExecutor(AgentExecutor):
         self.ctx_id_to_tools: dict[str, list[dict]] = {}
         # Per-context turn metrics accumulation (reset when final response is sent)
         self.ctx_id_to_turn_metrics: dict[str, dict] = {}
+        self.policy_controller = PolicyAwareController()
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         inbound_message = context.message
@@ -142,6 +227,7 @@ class CARBenchAgentExecutor(AgentExecutor):
                         tool_results.append({
                             "role": "tool",
                             "tool_call_id": matched_tc["id"],
+                            "name": tr_name,
                             "content": tr.get("content", ""),
                         })
                     else:
@@ -153,6 +239,7 @@ class CARBenchAgentExecutor(AgentExecutor):
                         tool_results.append({
                             "role": "tool",
                             "tool_call_id": tr.get("tool_call_id", tr.get("toolCallId", f"unknown_{tr_name}")),
+                            "name": tr_name,
                             "content": tr.get("content", ""),
                         })
             else:
@@ -163,6 +250,7 @@ class CARBenchAgentExecutor(AgentExecutor):
                     tool_results.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
+                        "name": tc.get("function", {}).get("name", ""),
                         "content": user_message_text or "",
                     })
 
@@ -178,24 +266,42 @@ class CARBenchAgentExecutor(AgentExecutor):
             # Regular user message
             messages.append({"role": "user", "content": user_message_text})
 
-        # Call LLM with native tool calling
-        try:
-            # Configure prompt caching (guard against empty lists)
-            if tools:
-                tools[-1]["function"]["cache_control"] = {"type": "ephemeral"}
-            if messages:
-                messages[0]["cache_control"] = {"type": "ephemeral"}
+        controlled_action = self.policy_controller.decide(
+            context_id=context.context_id,
+            messages=messages,
+            tools=tools,
+            latest_user_text=user_message_text if not incoming_tool_results else None,
+            latest_tool_results=incoming_tool_results,
+        )
 
-            completion_kwargs = {
-                "model": self.model,
-                "tools": tools if tools else None
-            }
+        if controlled_action is not None:
+            assistant_content = _assistant_content_from_next_action(controlled_action)
+            parts = _parts_from_assistant_content(assistant_content)
+            ctx_logger.info(
+                "Policy controller selected action",
+                action=controlled_action.action,
+                reason=controlled_action.reason,
+                num_tool_calls=len(controlled_action.tool_calls),
+            )
+        else:
+            # Call LLM with native tool calling
+            try:
+                # Configure prompt caching (guard against empty lists)
+                if tools:
+                    tools[-1]["function"]["cache_control"] = {"type": "ephemeral"}
+                if messages:
+                    messages[0]["cache_control"] = {"type": "ephemeral"}
 
-            if self.temperature is not None:
-                completion_kwargs["temperature"] = self.temperature
+                completion_kwargs = {
+                    "model": self.model,
+                    "tools": tools if tools else None
+                }
 
-            # Configure reasoning effort / thinking
-            if self.thinking:
+                if self.temperature is not None:
+                    completion_kwargs["temperature"] = self.temperature
+
+                # Configure reasoning effort / thinking
+                if self.thinking:
                     if self.model == "claude-opus-4-6":
                         completion_kwargs["thinking"] = {
                             "type": "adaptive"
@@ -222,105 +328,83 @@ class CARBenchAgentExecutor(AgentExecutor):
                             }
                     if self.interleaved_thinking:
                         completion_kwargs["extra_headers"] = {
-                                "anthropic-beta": "interleaved-thinking-2025-05-14"
-                            }
+                            "anthropic-beta": "interleaved-thinking-2025-05-14"
+                        }
 
+                call_start_time = time.perf_counter()
+                response = completion(
+                    messages=model_messages_with_competition_prompt(messages),
+                    **completion_kwargs
+                )
 
-            call_start_time = time.perf_counter()
-            response = completion(
-                messages=messages,
-                **completion_kwargs
-            )
+                # Accumulate turn metrics for this LLM call
+                call_end_time = time.perf_counter()
+                call_elapsed_ms = (call_end_time - call_start_time) * 1000.0
 
-            # Accumulate turn metrics for this LLM call
-            call_end_time = time.perf_counter()
-            call_elapsed_ms = (call_end_time - call_start_time) * 1000.0
+                if context.context_id not in self.ctx_id_to_turn_metrics:
+                    self.ctx_id_to_turn_metrics[context.context_id] = {
+                        PROMPT_TOKENS: 0,
+                        COMPLETION_TOKENS: 0,
+                        THINKING_TOKENS: 0,
+                        COST: 0.0,
+                        NUM_LLM_CALLS: 0,
+                        "_total_llm_time_ms": 0.0,
+                    }
 
-            if context.context_id not in self.ctx_id_to_turn_metrics:
-                self.ctx_id_to_turn_metrics[context.context_id] = {
-                    PROMPT_TOKENS: 0,
-                    COMPLETION_TOKENS: 0,
-                    THINKING_TOKENS: 0,
-                    COST: 0.0,
-                    NUM_LLM_CALLS: 0,
-                    "_total_llm_time_ms": 0.0,
-                }
+                turn_m = self.ctx_id_to_turn_metrics[context.context_id]
+                usage = getattr(response, "usage", None)
+                if usage:
+                    turn_m[PROMPT_TOKENS] += getattr(usage, "prompt_tokens", 0) or 0
+                    turn_m[COMPLETION_TOKENS] += getattr(usage, "completion_tokens", 0) or 0
+                    # Some providers report thinking/reasoning tokens in completion_tokens_details
+                    details = getattr(usage, "completion_tokens_details", None)
+                    if details:
+                        turn_m[THINKING_TOKENS] += getattr(details, "reasoning_tokens", 0) or 0
+                turn_m[COST] += getattr(response, "_hidden_params", {}).get("response_cost", 0.0) or 0.0
+                turn_m[NUM_LLM_CALLS] += 1
+                turn_m["_total_llm_time_ms"] += call_elapsed_ms
 
-            turn_m = self.ctx_id_to_turn_metrics[context.context_id]
-            usage = getattr(response, "usage", None)
-            if usage:
-                turn_m[PROMPT_TOKENS] += getattr(usage, "prompt_tokens", 0) or 0
-                turn_m[COMPLETION_TOKENS] += getattr(usage, "completion_tokens", 0) or 0
-                # Some providers report thinking/reasoning tokens in completion_tokens_details
-                details = getattr(usage, "completion_tokens_details", None)
-                if details:
-                    turn_m[THINKING_TOKENS] += getattr(details, "reasoning_tokens", 0) or 0
-            turn_m[COST] += getattr(response, "_hidden_params", {}).get("response_cost", 0.0) or 0.0
-            turn_m[NUM_LLM_CALLS] += 1
-            turn_m["_total_llm_time_ms"] += call_elapsed_ms
+                # Get the message from LLM
+                llm_message = response.choices[0].message
+                assistant_content = llm_message.model_dump(exclude_unset=True)
+                assistant_content = _validated_assistant_content(
+                    assistant_content,
+                    tool_index=ToolIndex(tools),
+                )
 
-            # Get the message from LLM
-            llm_message = response.choices[0].message
-            assistant_content = llm_message.model_dump(exclude_unset=True)
+                # Extract tool calls from assistant content
+                tool_calls = assistant_content.get("tool_calls")
 
-            # Extract tool calls from assistant content
-            tool_calls = assistant_content.get("tool_calls")
+                ctx_logger.info(
+                    "LLM response received",
+                    has_tool_calls=bool(tool_calls),
+                    num_tool_calls=len(tool_calls) if tool_calls else 0,
+                    has_content=bool(assistant_content.get("content")),
+                    content_length=len(assistant_content.get("content") or ""),
+                    has_thinking=bool(assistant_content.get("thinking_blocks") or assistant_content.get("reasoning_content"))
+                )
+                ctx_logger.debug(
+                    "LLM response details",
+                    context_id=context.context_id[:8],
+                    content=assistant_content.get("content"),
+                    tool_calls=[{"name": tc["function"]["name"], "args": tc["function"]["arguments"]} for tc in tool_calls] if tool_calls else None,
+                    reasoning_content=assistant_content.get("reasoning_content")
+                )
 
-            ctx_logger.info(
-                "LLM response received",
-                has_tool_calls=bool(tool_calls),
-                num_tool_calls=len(tool_calls) if tool_calls else 0,
-                has_content=bool(assistant_content.get("content")),
-                content_length=len(assistant_content.get("content") or ""),
-                has_thinking=bool(assistant_content.get("thinking_blocks") or assistant_content.get("reasoning_content"))
-            )
-            ctx_logger.debug(
-                "LLM response details",
-                context_id=context.context_id[:8],
-                content=assistant_content.get("content"),
-                tool_calls=[{"name": tc["function"]["name"], "args": tc["function"]["arguments"]} for tc in tool_calls] if tool_calls else None,
-                reasoning_content=assistant_content.get("reasoning_content")
-            )
+                parts = _parts_from_assistant_content(assistant_content)
 
-            # Build proper A2A Message with Parts (protobuf)
-            parts = []
+                ctx_logger.debug(
+                    "Sending response",
+                    context_id=context.context_id[:8],
+                    num_parts=len(parts),
+                )
 
-            # Add text Part if there's content
-            if assistant_content.get("content"):
-                parts.append(new_text_part(assistant_content["content"]))
-
-            # Add data Part if there are tool calls
-            if assistant_content.get("tool_calls"):
-                tool_calls_list = [
-                    ToolCall(
-                        tool_name=tc["function"]["name"],
-                        arguments=json.loads(tc["function"]["arguments"]),
-                    )
-                    for tc in assistant_content["tool_calls"]
-                ]
-                tool_calls_data = ToolCallsData(tool_calls=tool_calls_list)
-                parts.append(new_data_part(tool_calls_data.model_dump()))
-
-            # Add reasoning_content as data Part for debugging (if present)
-            if assistant_content.get("reasoning_content"):
-                parts.append(new_data_part({"reasoning_content": assistant_content["reasoning_content"]}))
-
-            # If no parts, add empty text
-            if not parts:
-                parts.append(new_text_part(assistant_content.get("content", "")))
-
-            ctx_logger.debug(
-                "Sending response",
-                context_id=context.context_id[:8],
-                num_parts=len(parts),
-            )
-
-        except Exception as e:
-            logger.error(f"LLM error: {e}")
-            # Error response as Parts
-            parts = [new_text_part(f"Error processing request: {str(e)}")]
-            # Create a simple assistant_content for error case
-            assistant_content = {"content": f"Error processing request: {str(e)}"}
+            except Exception as e:
+                logger.error(f"LLM error: {e}")
+                # Error response as Parts
+                parts = [new_text_part(f"Error processing request: {str(e)}")]
+                # Create a simple assistant_content for error case
+                assistant_content = {"content": f"Error processing request: {str(e)}"}
 
         # Add to history - preserve complete assistant message including thinking blocks
         # Store the full assistant_content to preserve thinking blocks and reasoning_content
@@ -332,12 +416,6 @@ class CARBenchAgentExecutor(AgentExecutor):
         # Preserve tool calls in proper format for LLM API
         if assistant_content.get("tool_calls"):
             assistant_message_for_history["tool_calls"] = assistant_content["tool_calls"]
-
-        # Preserve thinking blocks and reasoning content for Claude extended thinking
-        if assistant_content.get("thinking_blocks"):
-            assistant_message_for_history["thinking_blocks"] = assistant_content["thinking_blocks"]
-        if assistant_content.get("reasoning_content"):
-            assistant_message_for_history["reasoning_content"] = assistant_content["reasoning_content"]
 
         messages.append(assistant_message_for_history)
 
@@ -388,3 +466,4 @@ class CARBenchAgentExecutor(AgentExecutor):
             del self.ctx_id_to_tools[context.context_id]
         if context.context_id in self.ctx_id_to_turn_metrics:
             del self.ctx_id_to_turn_metrics[context.context_id]
+        self.policy_controller.reset(context.context_id)
