@@ -19,6 +19,7 @@ from .tool_index import ToolIndex
 
 BAD_SUNROOF_WEATHER = {"rainy", "cloudy_and_rain", "foggy", "snowy"}
 SAFE_SUNROOF_WEATHER = {"sunny", "cloudy", "partly_cloudy"}
+SAFE_FOG_LIGHT_WEATHER = {"cloudy_and_thunderstorm", "cloudy_and_hail"}
 
 
 @dataclass
@@ -141,6 +142,24 @@ class HighBeamFlow:
 
 
 @dataclass
+class FogLightFlow:
+    active: bool = False
+    on: bool = True
+    weather_checked: bool = False
+    weather_condition: str | None = None
+    weather_confirmation_requested: bool = False
+    weather_confirmed: bool = False
+    exterior_lights_checked: bool = False
+    fog_lights_on: bool | None = None
+    low_beams_on: bool | None = None
+    high_beams_on: bool | None = None
+    high_beam_confirmation_requested: bool = False
+    high_beam_confirmed: bool = False
+    declined: bool = False
+    completed: bool = False
+
+
+@dataclass
 class ControllerState:
     runtime: RuntimeContext = field(default_factory=RuntimeContext)
     sunroof: SunroofFlow = field(default_factory=SunroofFlow)
@@ -150,6 +169,7 @@ class ControllerState:
     air_circulation: AirCirculationFlow = field(default_factory=AirCirculationFlow)
     navigation: NavigationFlow = field(default_factory=NavigationFlow)
     high_beam: HighBeamFlow = field(default_factory=HighBeamFlow)
+    fog_lights: FogLightFlow = field(default_factory=FogLightFlow)
     last_user_text: str = ""
 
 
@@ -197,6 +217,8 @@ class PolicyAwareController:
             return self._next_navigation_action(state, tool_index)
         if state.high_beam.active:
             return self._next_high_beam_action(state, tool_index)
+        if state.fog_lights.active:
+            return self._next_fog_lights_action(state, tool_index)
 
         return None
 
@@ -255,6 +277,27 @@ class PolicyAwareController:
             if _is_negative(lowered):
                 high_beam.declined = True
                 high_beam.confirmation_requested = False
+                return
+
+        fog_lights = state.fog_lights
+        if fog_lights.weather_confirmation_requested:
+            if _is_affirmative(lowered):
+                fog_lights.weather_confirmed = True
+                fog_lights.weather_confirmation_requested = False
+                return
+            if _is_negative(lowered):
+                fog_lights.declined = True
+                fog_lights.weather_confirmation_requested = False
+                return
+
+        if fog_lights.high_beam_confirmation_requested:
+            if _is_affirmative(lowered):
+                fog_lights.high_beam_confirmed = True
+                fog_lights.high_beam_confirmation_requested = False
+                return
+            if _is_negative(lowered):
+                fog_lights.declined = True
+                fog_lights.high_beam_confirmation_requested = False
                 return
 
         if sunroof.active and sunroof.target_percentage is None:
@@ -335,6 +378,11 @@ class PolicyAwareController:
                     destination_name=destination,
                     route_preference=_extract_route_preference(lowered),
                 )
+        elif _is_fog_light_request(lowered):
+            state.fog_lights = FogLightFlow(
+                active=True,
+                on=not _is_light_off_request(lowered),
+            )
         elif _is_high_beam_request(lowered):
             state.high_beam = HighBeamFlow(
                 active=True,
@@ -363,6 +411,9 @@ class PolicyAwareController:
                 condition = current_slot.get("condition")
                 if isinstance(condition, str):
                     state.sunroof.weather_condition = condition
+                    state.fog_lights.weather_condition = condition
+                if state.fog_lights.active:
+                    state.fog_lights.weather_checked = True
             elif name == "get_user_preferences" and isinstance(result, dict):
                 state.sunroof.preferences_checked = True
                 preferred = _extract_preferred_sunroof_percentage(result)
@@ -427,11 +478,30 @@ class PolicyAwareController:
                 fog_lights = result.get("fog_lights")
                 if isinstance(fog_lights, bool):
                     state.high_beam.fog_lights_on = fog_lights
+                    state.fog_lights.fog_lights_on = fog_lights
+                if state.fog_lights.active:
+                    state.fog_lights.exterior_lights_checked = True
+                    low_beams = result.get("head_lights_low_beams")
+                    if isinstance(low_beams, bool):
+                        state.fog_lights.low_beams_on = low_beams
+                    high_beams = result.get("head_lights_high_beams")
+                    if isinstance(high_beams, bool):
+                        state.fog_lights.high_beams_on = high_beams
+            elif name == "set_head_lights_low_beams" and isinstance(result, dict):
+                on_value = result.get("on")
+                if isinstance(on_value, bool):
+                    state.fog_lights.low_beams_on = on_value
             elif name == "set_head_lights_high_beams" and isinstance(result, dict):
                 state.high_beam.completed = True
                 on_value = result.get("on")
                 if isinstance(on_value, bool):
                     state.high_beam.on = on_value
+                    state.fog_lights.high_beams_on = on_value
+            elif name == "set_fog_lights" and isinstance(result, dict):
+                state.fog_lights.completed = True
+                on_value = result.get("on")
+                if isinstance(on_value, bool):
+                    state.fog_lights.on = on_value
             elif name == "get_location_id_by_location_name":
                 if isinstance(result, dict) and isinstance(result.get("id"), str):
                     state.navigation.destination_id = result["id"]
@@ -804,6 +874,123 @@ class PolicyAwareController:
             reason="high_beam_set",
         )
 
+    def _next_fog_lights_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        fog_lights = state.fog_lights
+
+        if fog_lights.declined:
+            state.fog_lights = FogLightFlow()
+            return NextAction.respond(
+                "Okay, I won't change the fog lights.",
+                reason="fog_lights_declined",
+            )
+
+        if fog_lights.completed:
+            on = fog_lights.on
+            state.fog_lights = FogLightFlow()
+            return NextAction.respond(
+                "Done, the fog lights are on."
+                if on
+                else "Done, the fog lights are off.",
+                reason="fog_lights_done",
+            )
+
+        if not tool_index.has("set_fog_lights"):
+            return NextAction.respond(
+                "I can't change the fog lights because that control is unavailable right now.",
+                reason="fog_lights_missing_tool",
+            )
+
+        if not fog_lights.on:
+            return NextAction.tool_call(
+                "set_fog_lights",
+                {"on": False},
+                reason="fog_lights_off",
+            )
+
+        if not fog_lights.weather_checked:
+            if not tool_index.has("get_weather"):
+                return NextAction.respond(
+                    "I can't safely turn on the fog lights because the weather check is unavailable right now.",
+                    reason="fog_lights_missing_weather_tool",
+                )
+            weather_args = _weather_arguments(state.runtime)
+            if weather_args is None:
+                return NextAction.respond(
+                    "I need the current location and time before I can safely turn on the fog lights.",
+                    reason="fog_lights_missing_weather_context",
+                )
+            return NextAction.tool_call(
+                "get_weather",
+                weather_args,
+                reason="fog_lights_weather_check",
+            )
+
+        if (
+            _requires_fog_light_weather_confirmation(fog_lights.weather_condition)
+            and not fog_lights.weather_confirmed
+        ):
+            fog_lights.weather_confirmation_requested = True
+            condition = _friendly_weather(fog_lights.weather_condition)
+            return NextAction.respond(
+                f"It's {condition} right now, so turning on the fog lights needs your confirmation. Do you still want me to turn them on?",
+                reason="fog_lights_weather_confirmation",
+            )
+
+        if not fog_lights.exterior_lights_checked:
+            if not tool_index.has("get_exterior_lights_status"):
+                return NextAction.respond(
+                    "I can't safely turn on the fog lights because the exterior light status check is unavailable right now.",
+                    reason="fog_lights_missing_exterior_status_tool",
+                )
+            return NextAction.tool_call(
+                "get_exterior_lights_status",
+                reason="fog_lights_exterior_status_check",
+            )
+
+        if fog_lights.low_beams_on is None or fog_lights.high_beams_on is None:
+            return NextAction.respond(
+                "I can't safely turn on the fog lights because I couldn't determine the current headlight status.",
+                reason="fog_lights_unknown_headlight_status",
+            )
+
+        if fog_lights.low_beams_on is False:
+            if not tool_index.has("set_head_lights_low_beams"):
+                return NextAction.respond(
+                    "I can't safely turn on the fog lights because the low beam control is unavailable right now.",
+                    reason="fog_lights_missing_low_beam_tool",
+                )
+            return NextAction.tool_call(
+                "set_head_lights_low_beams",
+                {"on": True},
+                reason="fog_lights_enable_low_beams",
+            )
+
+        if fog_lights.high_beams_on is True:
+            if not tool_index.has("set_head_lights_high_beams"):
+                return NextAction.respond(
+                    "I can't safely turn on the fog lights because the high beam control is unavailable right now.",
+                    reason="fog_lights_missing_high_beam_tool",
+                )
+            if not fog_lights.high_beam_confirmed:
+                fog_lights.high_beam_confirmation_requested = True
+                return NextAction.respond(
+                    "The high beams are on, and I need to turn them off before turning on the fog lights. Please confirm if you want me to continue.",
+                    reason="fog_lights_high_beam_confirmation",
+                )
+            return NextAction.tool_call(
+                "set_head_lights_high_beams",
+                {"on": False},
+                reason="fog_lights_disable_high_beams",
+            )
+
+        return NextAction.tool_call(
+            "set_fog_lights",
+            {"on": True},
+            reason="fog_lights_on",
+        )
+
     def _next_navigation_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -1013,6 +1200,25 @@ def _is_high_beam_request(text: str) -> bool:
             "deactivate",
             "set",
             "need",
+        )
+    )
+
+
+def _is_fog_light_request(text: str) -> bool:
+    if not re.search(r"\bfog[- ]lights?\b", text):
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "turn on",
+            "turn off",
+            "switch on",
+            "switch off",
+            "activate",
+            "deactivate",
+            "set",
+            "need",
+            "want",
         )
     )
 
@@ -1491,6 +1697,12 @@ def _requires_weather_confirmation(condition: str | None) -> bool:
     if not condition:
         return True
     return condition not in SAFE_SUNROOF_WEATHER
+
+
+def _requires_fog_light_weather_confirmation(condition: str | None) -> bool:
+    if not condition:
+        return True
+    return condition not in SAFE_FOG_LIGHT_WEATHER
 
 
 def _friendly_weather(condition: str | None) -> str:
