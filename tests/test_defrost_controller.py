@@ -187,6 +187,51 @@ def test_front_defrost_controller_sets_defrost_when_climate_is_ready() -> None:
     ]
 
 
+def test_front_defrost_controller_treats_missing_ac_status_as_needing_ac() -> None:
+    controller = PolicyAwareController()
+    messages = [{"role": "system", "content": ""}]
+    tools = defrost_tools()
+
+    controller.decide(
+        context_id="ctx-defrost-unknown-ac",
+        messages=messages,
+        tools=tools,
+        latest_user_text="Turn on the front defrost.",
+    )
+    action = controller.decide(
+        context_id="ctx-defrost-unknown-ac",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_climate_settings",
+                {
+                    "fan_speed": 2,
+                    "fan_airflow_direction": "WINDSHIELD",
+                    "air_circulation": "AUTO",
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "get_vehicle_window_positions", "arguments": {}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-defrost-unknown-ac",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_vehicle_window_positions", window_positions(opened=0))
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "set_air_conditioning", "arguments": {"on": True}}
+    ]
+
+
 def test_defrost_controller_asks_for_window_when_ambiguous() -> None:
     controller = PolicyAwareController()
     messages = [{"role": "system", "content": ""}]
