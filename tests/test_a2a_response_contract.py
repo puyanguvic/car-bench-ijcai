@@ -1236,7 +1236,7 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(metrics[THINKING_TOKENS], 0)
         self.assertEqual(metrics[NUM_LLM_CALLS], 0)
         self.assertEqual(metrics[AVG_LLM_CALL_TIME_MS], 0.0)
-        self.assertEqual(metrics[NUM_PASSES], 0)
+        self.assertEqual(metrics[NUM_PASSES], 1)
 
     def test_cerebras_planner_executor_metrics_report_internal_passes(self) -> None:
         executor = CerebrasPlannerExecutor(

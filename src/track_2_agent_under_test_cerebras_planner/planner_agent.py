@@ -388,6 +388,7 @@ class PlannerExecutorCARBenchAgentExecutor(CerebrasNextActionExecutor):
                 MODEL: f"{self.planner_model}->{self.executor_model}",
                 THINKING_TOKENS: 0,
                 NUM_LLM_CALLS: 0,
+                NUM_PASSES: 1,
                 QUOTA_WAIT_TIME_MS: 0.0,
                 "_total_llm_time_ms": 0.0,
             },
@@ -405,7 +406,7 @@ class PlannerExecutorCARBenchAgentExecutor(CerebrasNextActionExecutor):
             if metrics[NUM_LLM_CALLS]
             else 0.0
         )
-        metrics[NUM_PASSES] = max(metrics.get(NUM_PASSES, 0), internal_calls)
+        metrics[NUM_PASSES] = max(metrics.get(NUM_PASSES, 1), max(internal_calls, 1))
 
 
 def build_planner_prompt(

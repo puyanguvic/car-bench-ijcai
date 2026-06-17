@@ -574,6 +574,7 @@ class CARBenchAgentExecutor(AgentExecutor):
                 MODEL: self.model,
                 THINKING_TOKENS: 0,
                 NUM_LLM_CALLS: 0,
+                NUM_PASSES: 1,
                 QUOTA_WAIT_TIME_MS: 0.0,
                 "_total_llm_time_ms": 0.0,
             },
@@ -593,7 +594,7 @@ class CARBenchAgentExecutor(AgentExecutor):
             if num_calls
             else 0.0
         )
-        metrics[NUM_PASSES] = max(metrics.get(NUM_PASSES, 0), internal_calls)
+        metrics[NUM_PASSES] = max(metrics.get(NUM_PASSES, 1), max(internal_calls, 1))
 
     @staticmethod
     def _public_turn_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
