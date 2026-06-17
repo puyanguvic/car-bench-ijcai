@@ -77,6 +77,18 @@ def test_high_beam_controller_checks_fog_lights_confirms_and_turns_on() -> None:
         {"tool_name": "set_head_lights_high_beams", "arguments": {"on": True}}
     ]
 
+    action = controller.decide(
+        context_id="ctx-high-beam",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("set_head_lights_high_beams", {"on": True})
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "high beam headlights are on" in action.content.lower()
+
 
 def test_high_beam_controller_refuses_when_fog_lights_are_on() -> None:
     controller = PolicyAwareController()
