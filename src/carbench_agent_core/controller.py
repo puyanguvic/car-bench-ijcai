@@ -14,6 +14,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .response_renderer import (
+    clean_user_content,
+    render_malformed_tool_arguments,
+    render_malformed_tool_call,
+)
 from .tool_index import ToolIndex
 
 
@@ -197,6 +202,7 @@ class NavigationFlow:
         Literal[
             "set_new",
             "replace_final_destination",
+            "delete_final_destination",
             "delete_waypoint",
             "replace_one_waypoint",
         ]
@@ -209,6 +215,7 @@ class NavigationFlow:
     routes_checked: bool = False
     routes: list[dict[str, Any]] = field(default_factory=list)
     route_choice_requested: bool = False
+    selected_route_index: int | None = None
     current_navigation_checked: bool = False
     needs_current_navigation: bool = False
     navigation_active: bool | None = None
@@ -235,6 +242,37 @@ class NavigationFlow:
     route_from_new_waypoint_checked: bool = False
     routes_from_new_waypoint: list[dict[str, Any]] = field(default_factory=list)
     completion_message: str | None = None
+    completed: bool = False
+    failure_message: str | None = None
+
+
+@dataclass
+class EmailFlow:
+    active: bool = False
+    mode: Literal["meeting_delay", "share_contact"] | None = None
+    recipient_name: str | None = None
+    recipient_first_name: str | None = None
+    recipient_last_name: str | None = None
+    recipient_contact_id: str | None = None
+    recipient_email: str | None = None
+    subject_name: str | None = None
+    subject_first_name: str | None = None
+    subject_last_name: str | None = None
+    subject_contact_id: str | None = None
+    subject_email: str | None = None
+    subject_phone: str | None = None
+    calendar_checked: bool = False
+    meeting_topic: str | None = None
+    meeting_started: bool | None = None
+    meeting_start_hour: int | None = None
+    meeting_start_minute: int | None = None
+    user_claimed_late: bool = False
+    pending_lookup_role: Literal["recipient", "subject"] | None = None
+    pending_contact_matches: dict[str, str] = field(default_factory=dict)
+    preferences_checked: bool = False
+    content_message: str | None = None
+    confirmation_requested: bool = False
+    confirmed: bool = False
     completed: bool = False
     failure_message: str | None = None
 
@@ -307,10 +345,17 @@ class ControllerState:
         default_factory=ReadingLightOccupancyFlow
     )
     navigation: NavigationFlow = field(default_factory=NavigationFlow)
+    email: EmailFlow = field(default_factory=EmailFlow)
     high_beam: HighBeamFlow = field(default_factory=HighBeamFlow)
     fog_lights: FogLightFlow = field(default_factory=FogLightFlow)
     defrost: DefrostFlow = field(default_factory=DefrostFlow)
     last_user_text: str = ""
+    recent_meeting_topic: str | None = None
+    recent_calendar_meetings: list[dict[str, Any]] = field(default_factory=list)
+    business_email_extra_recipients: list[str] = field(default_factory=list)
+    pending_location_lookup_name: str | None = None
+    recent_location_lookup_name: str | None = None
+    recent_location_lookup_id: str | None = None
 
 
 class PolicyAwareController:
@@ -336,6 +381,7 @@ class PolicyAwareController:
         state = self._states.setdefault(context_id, ControllerState())
         tool_index = ToolIndex(tools)
         self._sync_runtime_context(state, messages)
+        self._sync_recent_tool_call_arguments(state, messages)
 
         if latest_user_text:
             self._observe_user_text(state, latest_user_text)
@@ -343,42 +389,90 @@ class PolicyAwareController:
         if latest_tool_results:
             self._observe_tool_results(state, latest_tool_results)
 
+        action: NextAction | None = None
         if state.sunroof.active:
-            return self._next_sunroof_action(state, tool_index)
-        if state.sunshade.active:
-            return self._next_sunshade_action(state, tool_index)
-        if state.window_match.active:
-            return self._next_window_match_action(state, tool_index)
-        if state.window.active:
-            return self._next_window_action(state, tool_index)
-        if state.ambient_light.active:
-            return self._next_ambient_light_action(state, tool_index)
-        if state.trunk.active:
-            return self._next_trunk_action(state, tool_index)
-        if state.air_circulation.active:
-            return self._next_air_circulation_action(state, tool_index)
-        if state.air_conditioning.active:
-            return self._next_air_conditioning_action(state, tool_index)
-        if state.air_quality.active:
-            return self._next_air_quality_action(state, tool_index)
-        if state.fan_speed.active:
-            return self._next_fan_speed_action(state, tool_index)
-        if state.steering_wheel_heating.active:
-            return self._next_steering_wheel_heating_action(state, tool_index)
-        if state.reading_light_occupancy.active:
-            return self._next_reading_light_occupancy_action(state, tool_index)
-        if state.reading_light.active:
-            return self._next_reading_light_action(state, tool_index)
-        if state.defrost.active:
-            return self._next_defrost_action(state, tool_index)
-        if state.navigation.active:
-            return self._next_navigation_action(state, tool_index)
-        if state.high_beam.active:
-            return self._next_high_beam_action(state, tool_index)
-        if state.fog_lights.active:
-            return self._next_fog_lights_action(state, tool_index)
+            action = self._next_sunroof_action(state, tool_index)
+        elif state.sunshade.active:
+            action = self._next_sunshade_action(state, tool_index)
+        elif state.window_match.active:
+            action = self._next_window_match_action(state, tool_index)
+        elif state.window.active:
+            action = self._next_window_action(state, tool_index)
+        elif state.ambient_light.active:
+            action = self._next_ambient_light_action(state, tool_index)
+        elif state.trunk.active:
+            action = self._next_trunk_action(state, tool_index)
+        elif state.air_circulation.active:
+            action = self._next_air_circulation_action(state, tool_index)
+        elif state.air_conditioning.active:
+            action = self._next_air_conditioning_action(state, tool_index)
+        elif state.air_quality.active:
+            action = self._next_air_quality_action(state, tool_index)
+        elif state.fan_speed.active:
+            action = self._next_fan_speed_action(state, tool_index)
+        elif state.steering_wheel_heating.active:
+            action = self._next_steering_wheel_heating_action(state, tool_index)
+        elif state.reading_light_occupancy.active:
+            action = self._next_reading_light_occupancy_action(state, tool_index)
+        elif state.reading_light.active:
+            action = self._next_reading_light_action(state, tool_index)
+        elif state.defrost.active:
+            action = self._next_defrost_action(state, tool_index)
+        elif state.navigation.active:
+            action = self._next_navigation_action(state, tool_index)
+        elif state.email.active:
+            action = self._next_email_action(state, tool_index)
+        elif state.high_beam.active:
+            action = self._next_high_beam_action(state, tool_index)
+        elif state.fog_lights.active:
+            action = self._next_fog_lights_action(state, tool_index)
+
+        if action is not None:
+            return self._validated_controller_action(action, tool_index)
 
         return None
+
+    def _validated_controller_action(
+        self, action: NextAction, tool_index: ToolIndex
+    ) -> NextAction:
+        if action.action == "respond":
+            return NextAction.respond(
+                clean_user_content(action.content),
+                reason=action.reason,
+            )
+
+        if action.action != "tool_calls" or not action.tool_calls:
+            return NextAction.respond(
+                render_malformed_tool_call(),
+                reason=f"{action.reason}_invalid_tool_call",
+            )
+
+        for tool_call in action.tool_calls:
+            if not isinstance(tool_call, dict):
+                return NextAction.respond(
+                    render_malformed_tool_call(),
+                    reason=f"{action.reason}_invalid_tool_call",
+                )
+            tool_name = tool_call.get("tool_name")
+            arguments = tool_call.get("arguments") or {}
+            if not isinstance(tool_name, str) or not tool_name:
+                return NextAction.respond(
+                    render_malformed_tool_call(),
+                    reason=f"{action.reason}_invalid_tool_call",
+                )
+            if not isinstance(arguments, dict):
+                return NextAction.respond(
+                    render_malformed_tool_arguments(),
+                    reason=f"{action.reason}_invalid_tool_arguments",
+                )
+            validation_error = tool_index.validate_call(tool_name, arguments)
+            if validation_error:
+                return NextAction.respond(
+                    validation_error,
+                    reason=f"{action.reason}_schema_guard",
+                )
+
+        return action
 
     def _sync_runtime_context(
         self, state: ControllerState, messages: list[dict[str, Any]]
@@ -404,6 +498,33 @@ class PolicyAwareController:
                 datetime_value.get("minute"), state.runtime.minute
             )
 
+        business_email_extra_recipients = _extract_business_email_extra_recipients(
+            system_prompt
+        )
+        if business_email_extra_recipients:
+            state.business_email_extra_recipients = business_email_extra_recipients
+
+    def _sync_recent_tool_call_arguments(
+        self, state: ControllerState, messages: list[dict[str, Any]]
+    ) -> None:
+        for message in reversed(messages):
+            if message.get("role") != "assistant":
+                continue
+            if not message.get("tool_calls"):
+                return
+            for tool_call in reversed(message["tool_calls"]):
+                function = tool_call.get("function") or {}
+                if function.get("name") != "get_location_id_by_location_name":
+                    continue
+                arguments = _parse_tool_call_arguments(function.get("arguments"))
+                location = arguments.get("location")
+                if isinstance(location, str):
+                    state.pending_location_lookup_name = (
+                        _clean_location_query(location) or location.strip()
+                    )
+                return
+            return
+
     def _observe_user_text(self, state: ControllerState, text: str) -> None:
         text = text.strip()
         if not text:
@@ -415,11 +536,49 @@ class PolicyAwareController:
         if "###stop###" in lowered:
             return
 
+        quoted_meeting = _extract_quoted_meeting_topic(text)
+        if quoted_meeting is not None:
+            state.recent_meeting_topic = quoted_meeting
+
         sunroof = state.sunroof
         if sunroof.weather_confirmation_requested and _is_affirmative(lowered):
             sunroof.weather_confirmed = True
             sunroof.weather_confirmation_requested = False
             return
+
+        email = state.email
+        if email.confirmation_requested:
+            if _is_affirmative(lowered):
+                email.confirmed = True
+                email.confirmation_requested = False
+                return
+            if _is_negative(lowered):
+                state.email = EmailFlow()
+                return
+
+        if email.active and email.pending_contact_matches:
+            selected = _select_contact_match_from_text(
+                email.pending_contact_matches, text
+            )
+            if selected is not None:
+                if email.pending_lookup_role == "recipient":
+                    email.recipient_contact_id = selected
+                    email.recipient_name = email.pending_contact_matches[selected]
+                    _set_email_flow_name(email, "recipient", email.recipient_name)
+                elif email.pending_lookup_role == "subject":
+                    email.subject_contact_id = selected
+                    email.subject_name = email.pending_contact_matches[selected]
+                    _set_email_flow_name(email, "subject", email.subject_name)
+                email.pending_contact_matches = {}
+                email.pending_lookup_role = None
+                return
+
+        if email.active and email.mode == "share_contact":
+            subject_name = _extract_contact_share_subject(text)
+            if subject_name is not None and email.subject_contact_id is None:
+                email.subject_name = subject_name
+                _set_email_flow_name(email, "subject", subject_name)
+                return
 
         window = state.window
         if window.ac_confirmation_requested and _is_affirmative(lowered):
@@ -560,6 +719,11 @@ class PolicyAwareController:
                 return
 
         if navigation.active and navigation.route_choice_requested:
+            route_index = _extract_route_choice_index(lowered)
+            if route_index is not None:
+                navigation.selected_route_index = route_index
+                navigation.route_choice_requested = False
+                return
             route_preference = _extract_route_preference(lowered)
             if route_preference is not None:
                 navigation.route_preference = route_preference
@@ -642,6 +806,25 @@ class PolicyAwareController:
                 on=not _is_light_off_request(lowered),
                 defrost_window=_extract_defrost_window(lowered),
             )
+        elif _is_navigation_delete_destination_request(lowered):
+            previous_navigation = state.navigation
+            destination_name = _extract_navigation_destination_to_delete(text)
+            destination_id = _matching_recent_location_id(
+                destination_name,
+                previous_navigation.destination_name,
+                previous_navigation.destination_id,
+            ) or _matching_recent_location_id(
+                destination_name,
+                state.recent_location_lookup_name,
+                state.recent_location_lookup_id,
+            )
+            state.navigation = NavigationFlow(
+                active=True,
+                mode="delete_final_destination",
+                destination_name=destination_name,
+                destination_id=destination_id,
+                needs_current_navigation=destination_id is None,
+            )
         elif _is_navigation_replace_waypoint_request(lowered):
             state.navigation = NavigationFlow(
                 active=True,
@@ -713,6 +896,29 @@ class PolicyAwareController:
                     if current_waypoints
                     else [],
                 )
+        elif _is_meeting_delay_email_request(lowered) or (
+            state.recent_meeting_topic and _is_late_email_request(lowered)
+        ):
+            recipient = _extract_email_recipient_name(text)
+            if recipient is not None:
+                state.email = EmailFlow(
+                    active=True,
+                    mode="meeting_delay",
+                    recipient_name=recipient,
+                    meeting_topic=state.recent_meeting_topic,
+                    calendar_checked=bool(state.recent_calendar_meetings),
+                    user_claimed_late=True,
+                )
+                _set_email_flow_name(state.email, "recipient", recipient)
+        elif _is_contact_share_email_start(lowered):
+            recipient = _extract_email_recipient_name(text)
+            if recipient is not None:
+                state.email = EmailFlow(
+                    active=True,
+                    mode="share_contact",
+                    recipient_name=recipient,
+                )
+                _set_email_flow_name(state.email, "recipient", recipient)
         elif _is_fog_light_request(lowered):
             state.fog_lights = FogLightFlow(
                 active=True,
@@ -783,6 +989,18 @@ class PolicyAwareController:
                     and state.steering_wheel_heating.level is None
                 ):
                     state.steering_wheel_heating.level = preferred_heating_level
+                state.business_email_extra_recipients = (
+                    state.business_email_extra_recipients
+                    + [
+                        email
+                        for email in _extract_business_email_extra_recipients(
+                            json.dumps(result, ensure_ascii=False)
+                        )
+                        if email not in state.business_email_extra_recipients
+                    ]
+                )
+                if state.email.active:
+                    state.email.preferences_checked = True
             elif name == "get_car_color" and isinstance(result, dict):
                 if state.ambient_light.active:
                     state.ambient_light.car_color_checked = True
@@ -1032,8 +1250,24 @@ class PolicyAwareController:
                                     if isinstance(waypoint, dict)
                                 ]
                         _resolve_navigation_waypoint_from_state(state.navigation)
+            elif name == "get_entries_from_calendar":
+                if isinstance(result, dict):
+                    meetings = result.get("meetings")
+                    if isinstance(meetings, list):
+                        state.recent_calendar_meetings = [
+                            meeting for meeting in meetings if isinstance(meeting, dict)
+                        ]
+                    if state.email.active and state.email.mode == "meeting_delay":
+                        state.email.calendar_checked = True
+                        _record_email_meeting_status(state)
             elif name == "get_location_id_by_location_name":
                 if isinstance(result, dict) and isinstance(result.get("id"), str):
+                    if state.pending_location_lookup_name:
+                        state.recent_location_lookup_name = (
+                            state.pending_location_lookup_name
+                        )
+                        state.recent_location_lookup_id = result["id"]
+                        state.pending_location_lookup_name = None
                     if state.navigation.mode == "replace_one_waypoint":
                         state.navigation.new_waypoint_id = result["id"]
                     else:
@@ -1047,6 +1281,12 @@ class PolicyAwareController:
                     state.navigation.failure_message = (
                         f"I couldn't find a location ID for {destination}."
                     )
+            elif name == "get_contact_id_by_contact_name":
+                if state.email.active:
+                    _record_email_contact_matches(state.email, result)
+            elif name == "get_contact_information":
+                if state.email.active:
+                    _record_email_contact_information(state.email, result)
             elif name == "get_routes_from_start_to_destination":
                 if isinstance(result, dict) and isinstance(result.get("routes"), list):
                     routes = [
@@ -1065,6 +1305,7 @@ class PolicyAwareController:
             elif name in {
                 "set_new_navigation",
                 "navigation_replace_final_destination",
+                "navigation_delete_destination",
                 "navigation_delete_waypoint",
                 "navigation_replace_one_waypoint",
             } and isinstance(result, dict):
@@ -1081,6 +1322,9 @@ class PolicyAwareController:
                     state.navigation.routes_to_final_destination_id = [
                         str(route) for route in routes if isinstance(route, str)
                     ]
+            elif name == "send_email" and state.email.active:
+                if isinstance(payload, dict) and payload.get("status") == "SUCCESS":
+                    state.email.completed = True
 
     def _next_sunroof_action(
         self, state: ControllerState, tool_index: ToolIndex
@@ -1853,6 +2097,184 @@ class PolicyAwareController:
             reason="reading_light_set",
         )
 
+    def _next_email_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        email = state.email
+
+        if email.completed:
+            state.email = EmailFlow()
+            return NextAction.respond(
+                "Done, the email has been sent.",
+                reason="email_done",
+            )
+
+        if email.failure_message:
+            state.email = EmailFlow()
+            return NextAction.respond(email.failure_message, reason="email_failed")
+
+        if not tool_index.has("send_email"):
+            return NextAction.respond(
+                "I can't send email because the email tool is unavailable right now.",
+                reason="email_missing_send_tool",
+            )
+
+        if email.pending_contact_matches:
+            return NextAction.respond(
+                _format_contact_choice_prompt(email.pending_contact_matches),
+                reason="email_contact_disambiguation",
+            )
+
+        if email.recipient_contact_id is None:
+            return self._next_email_contact_lookup(
+                email,
+                tool_index,
+                role="recipient",
+            )
+
+        if email.mode == "share_contact" and email.subject_contact_id is None:
+            if email.subject_name is None:
+                return NextAction.respond(
+                    "Whose contact details should I include in the email?",
+                    reason="email_missing_contact_to_share",
+                )
+            return self._next_email_contact_lookup(
+                email,
+                tool_index,
+                role="subject",
+            )
+
+        if email.mode == "meeting_delay":
+            if email.calendar_checked and email.meeting_started is None:
+                _record_email_meeting_status(state)
+
+            if not email.calendar_checked:
+                if state.recent_calendar_meetings:
+                    email.calendar_checked = True
+                    _record_email_meeting_status(state)
+                elif not tool_index.has("get_entries_from_calendar"):
+                    return NextAction.respond(
+                        "I can't verify the meeting status because calendar lookup is unavailable right now.",
+                        reason="email_missing_calendar_tool",
+                    )
+                else:
+                    calendar_args = _calendar_arguments(state.runtime)
+                    if calendar_args is None:
+                        return NextAction.respond(
+                            "I need today's date before I can verify the meeting status.",
+                            reason="email_missing_calendar_context",
+                        )
+                    return NextAction.tool_call(
+                        "get_entries_from_calendar",
+                        calendar_args,
+                        reason="email_calendar_lookup",
+                    )
+
+            if email.meeting_started is False and not email.user_claimed_late:
+                return NextAction.respond(
+                    "That meeting has not started yet, so I will not send a late-arrival email.",
+                    reason="email_meeting_not_started",
+                )
+
+        missing_contact_ids = _email_missing_contact_info_ids(email)
+        if missing_contact_ids:
+            if not tool_index.has("get_contact_information"):
+                return NextAction.respond(
+                    "I can't send the email because contact details lookup is unavailable right now.",
+                    reason="email_missing_contact_info_tool",
+                )
+            return NextAction.tool_call(
+                "get_contact_information",
+                {"contact_ids": missing_contact_ids},
+                reason="email_contact_information_lookup",
+            )
+
+        if email.recipient_email is None:
+            return NextAction.respond(
+                "I can't send the email because I couldn't find the recipient's email address.",
+                reason="email_missing_recipient_address",
+            )
+
+        if (
+            email.mode == "meeting_delay"
+            and not email.preferences_checked
+            and not state.business_email_extra_recipients
+            and tool_index.has("get_user_preferences")
+        ):
+            return NextAction.tool_call(
+                "get_user_preferences",
+                {
+                    "preference_categories": {
+                        "productivity_and_communication": {"email": True}
+                    }
+                },
+                reason="email_preferences_lookup",
+            )
+
+        if email.content_message is None:
+            email.content_message = _build_email_content(state)
+            if email.content_message is None:
+                return NextAction.respond(
+                    "What should the email say?",
+                    reason="email_missing_content",
+                )
+
+        if not email.confirmed:
+            email.confirmation_requested = True
+            return NextAction.respond(
+                _format_email_confirmation(
+                    email, state.business_email_extra_recipients
+                ),
+                reason="email_confirmation",
+            )
+
+        return NextAction.tool_call(
+            "send_email",
+            {
+                "email_addresses": _email_recipient_addresses(
+                    email, state.business_email_extra_recipients
+                ),
+                "content_message": email.content_message,
+            },
+            reason="email_send",
+        )
+
+    def _next_email_contact_lookup(
+        self,
+        email: EmailFlow,
+        tool_index: ToolIndex,
+        *,
+        role: Literal["recipient", "subject"],
+    ) -> NextAction | None:
+        if not tool_index.has("get_contact_id_by_contact_name"):
+            return NextAction.respond(
+                "I can't look up contacts because contact search is unavailable right now.",
+                reason="email_missing_contact_lookup_tool",
+            )
+
+        first_name = email.recipient_first_name
+        last_name = email.recipient_last_name
+        if role == "subject":
+            first_name = email.subject_first_name
+            last_name = email.subject_last_name
+
+        if not first_name:
+            return NextAction.respond(
+                "Which contact should I look up?",
+                reason="email_missing_contact_name",
+            )
+
+        arguments = {"contact_first_name": first_name}
+        if last_name:
+            arguments["contact_last_name"] = last_name
+
+        email.pending_lookup_role = role
+        return NextAction.tool_call(
+            "get_contact_id_by_contact_name",
+            arguments,
+            reason=f"email_{role}_contact_lookup",
+        )
+
     def _next_high_beam_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -2175,6 +2597,11 @@ class PolicyAwareController:
         if navigation.mode == "delete_waypoint":
             return self._next_navigation_delete_waypoint_action(navigation, tool_index)
 
+        if navigation.mode == "delete_final_destination":
+            return self._next_navigation_delete_destination_action(
+                navigation, tool_index
+            )
+
         if navigation.mode == "replace_one_waypoint":
             return self._next_navigation_replace_waypoint_action(navigation, tool_index)
 
@@ -2235,7 +2662,11 @@ class PolicyAwareController:
                 reason="navigation_route_lookup",
             )
 
-        selected_route = _select_route(navigation.routes, navigation.route_preference)
+        selected_route = _select_requested_route(
+            navigation.routes,
+            navigation.route_preference,
+            navigation.selected_route_index,
+        )
         if selected_route is None:
             if len(navigation.routes) == 1:
                 selected_route = navigation.routes[0]
@@ -2287,6 +2718,62 @@ class PolicyAwareController:
             "set_new_navigation",
             {"route_ids": [route_id]},
             reason="navigation_set_new",
+        )
+
+    def _next_navigation_delete_destination_action(
+        self, navigation: NavigationFlow, tool_index: ToolIndex
+    ) -> NextAction | None:
+        _resolve_navigation_final_destination_from_state(navigation)
+
+        if (
+            navigation.destination_id is None
+            and not navigation.current_navigation_checked
+        ):
+            if not tool_index.has("get_current_navigation_state"):
+                return NextAction.respond(
+                    "I need the current navigation state before I can safely edit this route.",
+                    reason="navigation_missing_current_state_tool",
+                )
+            return NextAction.tool_call(
+                "get_current_navigation_state",
+                {"detailed_information": True},
+                reason="navigation_current_state_check",
+            )
+
+        if navigation.navigation_active is False:
+            return NextAction.respond(
+                "Navigation is not active right now.",
+                reason="navigation_not_active",
+            )
+
+        _resolve_navigation_final_destination_from_state(navigation)
+        if navigation.destination_id is None:
+            if navigation.destination_name and tool_index.has(
+                "get_location_id_by_location_name"
+            ):
+                return NextAction.tool_call(
+                    "get_location_id_by_location_name",
+                    {"location": navigation.destination_name},
+                    reason="navigation_lookup_destination_to_delete",
+                )
+            return NextAction.respond(
+                "Which final destination should I remove from the route?",
+                reason="navigation_missing_destination_to_delete",
+            )
+
+        if not tool_index.has("navigation_delete_destination"):
+            return NextAction.respond(
+                "I can't delete the destination because that navigation edit control is unavailable right now.",
+                reason="navigation_missing_delete_destination_tool",
+            )
+
+        navigation.completion_message = (
+            "Done, the final destination is removed from the navigation route."
+        )
+        return NextAction.tool_call(
+            "navigation_delete_destination",
+            {"destination_id_to_delete": navigation.destination_id},
+            reason="navigation_delete_destination",
         )
 
     def _next_navigation_delete_waypoint_action(
@@ -2346,11 +2833,10 @@ class PolicyAwareController:
                 reason="navigation_delete_waypoint_route_lookup",
             )
 
-        if navigation.route_preference is None:
-            navigation.route_preference = "fastest"
-
-        selected_route = _select_route(
-            navigation.routes_without_waypoint, navigation.route_preference
+        selected_route = _select_requested_route(
+            navigation.routes_without_waypoint,
+            navigation.route_preference,
+            navigation.selected_route_index,
         )
         if selected_route is None:
             if len(navigation.routes_without_waypoint) == 1:
@@ -2478,8 +2964,13 @@ class PolicyAwareController:
                 reason="navigation_route_from_new_waypoint_lookup",
             )
 
-        route_to_new_waypoint = _select_route(
-            navigation.routes_to_new_waypoint, navigation.route_preference
+        if navigation.route_preference is None:
+            navigation.route_preference = "fastest"
+
+        route_to_new_waypoint = _select_requested_route(
+            navigation.routes_to_new_waypoint,
+            navigation.route_preference,
+            navigation.selected_route_index,
         )
         if (
             route_to_new_waypoint is None
@@ -2487,8 +2978,10 @@ class PolicyAwareController:
         ):
             route_to_new_waypoint = navigation.routes_to_new_waypoint[0]
 
-        route_from_new_waypoint = _select_route(
-            navigation.routes_from_new_waypoint, navigation.route_preference
+        route_from_new_waypoint = _select_requested_route(
+            navigation.routes_from_new_waypoint,
+            navigation.route_preference,
+            navigation.selected_route_index,
         )
         if (
             route_from_new_waypoint is None
@@ -2539,7 +3032,7 @@ class PolicyAwareController:
 
 
 def _extract_json_after_label(text: str, label: str) -> dict[str, Any] | None:
-    label_index = text.find(label)
+    label_index = text.rfind(label)
     if label_index == -1:
         return None
     start = text.find("{", label_index)
@@ -2582,6 +3075,401 @@ def _balanced_json_object(text: str, start: int) -> str | None:
             if depth == 0:
                 return text[start : index + 1]
     return None
+
+
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
+
+
+def _extract_business_email_extra_recipients(text: str) -> list[str]:
+    lowered = text.lower()
+    recipients: list[str] = []
+    for match in re.finditer(r"secretary", lowered):
+        segment = text[max(0, match.start() - 240) : match.end() + 240]
+        if "business" not in segment.lower() and "email" not in segment.lower():
+            continue
+        for email in EMAIL_RE.findall(segment):
+            if email not in recipients:
+                recipients.append(email)
+    return recipients
+
+
+def _extract_quoted_meeting_topic(text: str) -> str | None:
+    if "meeting" not in text.lower():
+        return None
+    match = re.search(r"['\"]([^'\"]+)['\"]", text)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _is_meeting_delay_email_request(text: str) -> bool:
+    if "email" not in text or "meeting" not in text:
+        return False
+    return _is_late_email_request(text)
+
+
+def _is_late_email_request(text: str) -> bool:
+    if "email" not in text:
+        return False
+    if not any(word in text for word in ("late", "delay", "apologize", "apologise")):
+        return False
+    return bool(re.search(r"\b(send|write|email)\b", text))
+
+
+def _is_contact_share_email_start(text: str) -> bool:
+    if "email" not in text:
+        return False
+    if not any(phrase in text for phrase in ("contact information", "contact info")):
+        return False
+    return bool(
+        re.search(r"\blook up\b", text)
+        or re.search(r"\bfind\b", text)
+        or re.search(r"\bsend\b", text)
+    )
+
+
+def _extract_email_recipient_name(text: str) -> str | None:
+    location = _location_name_pattern()
+    patterns = (
+        rf"\b(?i:send|write|email)\s+(?:an?\s+)?(?i:email)?\s*(?:to\s+)?{location}",
+        rf"\b(?i:email)\s+{location}",
+        rf"\b(?i:look up|find)\s+{location}(?:'s)?\s+(?i:contact)",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            value = matches[-1]
+            if isinstance(value, tuple):
+                value = value[-1]
+            name = _clean_person_name(value)
+            if name:
+                return name
+    return None
+
+
+def _extract_contact_share_subject(text: str) -> str | None:
+    location = _location_name_pattern()
+    patterns = (
+        rf"\b(?i:share|include|send)\s+{location}(?:'s)?\s+(?i:contact)",
+        rf"\b{location}(?:'s)?\s+(?i:contact details|contact information|contact info)",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            value = matches[-1]
+            if isinstance(value, tuple):
+                value = value[-1]
+            name = _clean_person_name(value)
+            if name:
+                return name
+    return None
+
+
+def _clean_person_name(value: str) -> str | None:
+    value = re.split(
+        r"\b(?:for|with|about|because|so|and|to|from|please|i|me)\b",
+        value,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    value = " ".join(value.strip(" .?!;:-'\"").split())
+    if not value or value.lower() in {"an", "a", "the", "her", "him", "them"}:
+        return None
+    return value
+
+
+def _set_email_flow_name(
+    email: EmailFlow, role: Literal["recipient", "subject"], name: str
+) -> None:
+    parts = name.strip().split()
+    first_name = parts[0] if parts else None
+    last_name = " ".join(parts[1:]) if len(parts) > 1 else None
+    if role == "recipient":
+        email.recipient_name = name
+        email.recipient_first_name = first_name
+        email.recipient_last_name = last_name
+    else:
+        email.subject_name = name
+        email.subject_first_name = first_name
+        email.subject_last_name = last_name
+
+
+def _select_contact_match_from_text(matches: dict[str, str], text: str) -> str | None:
+    lowered = text.casefold()
+    exact: list[str] = []
+    partial: list[str] = []
+    for contact_id, name in matches.items():
+        normalized = name.casefold()
+        if normalized in lowered:
+            exact.append(contact_id)
+        elif all(part in lowered for part in normalized.split()):
+            partial.append(contact_id)
+    if len(exact) == 1:
+        return exact[0]
+    if len(partial) == 1:
+        return partial[0]
+    return None
+
+
+def _record_email_meeting_status(state: ControllerState) -> None:
+    email = state.email
+    meetings = state.recent_calendar_meetings
+    if not meetings:
+        email.meeting_started = False
+        return
+
+    selected = _select_meeting(meetings, email.meeting_topic)
+    if selected is None:
+        email.meeting_started = False
+        return
+
+    topic = selected.get("topic")
+    if isinstance(topic, str):
+        email.meeting_topic = topic
+        state.recent_meeting_topic = topic
+
+    start = selected.get("start")
+    if isinstance(start, dict):
+        email.meeting_start_hour = _safe_int(start.get("hour"))
+        email.meeting_start_minute = _safe_int(start.get("minute"), 0)
+
+    email.meeting_started = _meeting_has_started(
+        state.runtime, email.meeting_start_hour, email.meeting_start_minute
+    )
+
+
+def _select_meeting(
+    meetings: list[dict[str, Any]], topic: str | None
+) -> dict[str, Any] | None:
+    if topic:
+        normalized_topic = topic.casefold()
+        for meeting in meetings:
+            meeting_topic = meeting.get("topic")
+            if (
+                isinstance(meeting_topic, str)
+                and meeting_topic.casefold() == normalized_topic
+            ):
+                return meeting
+    return meetings[0] if len(meetings) == 1 else None
+
+
+def _meeting_has_started(
+    runtime: RuntimeContext, start_hour: int | None, start_minute: int | None
+) -> bool | None:
+    if runtime.hour is None or start_hour is None:
+        return None
+    current_minutes = runtime.hour * 60 + (runtime.minute or 0)
+    start_minutes = start_hour * 60 + (start_minute or 0)
+    return current_minutes >= start_minutes
+
+
+def _record_email_contact_matches(email: EmailFlow, result: Any) -> None:
+    if not isinstance(result, dict):
+        email.failure_message = "I couldn't look up that contact."
+        return
+
+    raw_matches = result.get("matches")
+    if not isinstance(raw_matches, dict) or not raw_matches:
+        email.failure_message = "I couldn't find that contact."
+        return
+
+    matches = {
+        str(contact_id): str(name)
+        for contact_id, name in raw_matches.items()
+        if isinstance(contact_id, str)
+    }
+    role = email.pending_lookup_role
+    if role is None:
+        return
+
+    target_name = email.recipient_name if role == "recipient" else email.subject_name
+    selected = _select_contact_match_by_target(matches, target_name)
+    if selected is None and len(matches) == 1:
+        selected = next(iter(matches))
+
+    if selected is None:
+        email.pending_contact_matches = matches
+        return
+
+    if role == "recipient":
+        email.recipient_contact_id = selected
+        email.recipient_name = matches[selected]
+        _set_email_flow_name(email, "recipient", email.recipient_name)
+    else:
+        email.subject_contact_id = selected
+        email.subject_name = matches[selected]
+        _set_email_flow_name(email, "subject", email.subject_name)
+    email.pending_lookup_role = None
+    email.pending_contact_matches = {}
+
+
+def _select_contact_match_by_target(
+    matches: dict[str, str], target_name: str | None
+) -> str | None:
+    if not target_name:
+        return None
+    normalized_target = target_name.casefold()
+    for contact_id, name in matches.items():
+        if name.casefold() == normalized_target:
+            return contact_id
+    target_parts = normalized_target.split()
+    candidates = []
+    for contact_id, name in matches.items():
+        normalized_name = name.casefold()
+        if all(part in normalized_name.split() for part in target_parts):
+            candidates.append(contact_id)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _record_email_contact_information(email: EmailFlow, result: Any) -> None:
+    if not isinstance(result, dict):
+        return
+    for contact_id, info in result.items():
+        if not isinstance(contact_id, str) or not isinstance(info, dict):
+            continue
+        if contact_id == email.recipient_contact_id:
+            email.recipient_email = _extract_email_from_contact_info(info)
+            email.recipient_name = _contact_info_name(info) or email.recipient_name
+            if email.recipient_name:
+                _set_email_flow_name(email, "recipient", email.recipient_name)
+        if contact_id == email.subject_contact_id:
+            email.subject_email = _extract_email_from_contact_info(info)
+            email.subject_phone = _extract_phone_from_contact_info(info)
+            email.subject_name = _contact_info_name(info) or email.subject_name
+            if email.subject_name:
+                _set_email_flow_name(email, "subject", email.subject_name)
+
+
+def _extract_email_from_contact_info(info: dict[str, Any]) -> str | None:
+    email = info.get("email")
+    return email if isinstance(email, str) and email else None
+
+
+def _extract_phone_from_contact_info(info: dict[str, Any]) -> str | None:
+    phone = info.get("phone_number")
+    return phone if isinstance(phone, str) and phone else None
+
+
+def _contact_info_name(info: dict[str, Any]) -> str | None:
+    raw_name = info.get("name")
+    if isinstance(raw_name, dict):
+        first = raw_name.get("first_name")
+        last = raw_name.get("last_name")
+        parts = [part for part in (first, last) if isinstance(part, str) and part]
+        return " ".join(parts) if parts else None
+    if isinstance(raw_name, str):
+        return raw_name
+    return None
+
+
+def _email_missing_contact_info_ids(email: EmailFlow) -> list[str]:
+    ids: list[str] = []
+    if email.recipient_contact_id and email.recipient_email is None:
+        ids.append(email.recipient_contact_id)
+    if (
+        email.mode == "share_contact"
+        and email.subject_contact_id
+        and (email.subject_email is None or email.subject_phone is None)
+    ):
+        ids.append(email.subject_contact_id)
+    return ids
+
+
+def _calendar_arguments(runtime: RuntimeContext) -> dict[str, Any] | None:
+    if runtime.month is None or runtime.day is None:
+        return None
+    return {"month": runtime.month, "day": runtime.day}
+
+
+def _build_email_content(state: ControllerState) -> str | None:
+    email = state.email
+    if email.mode == "meeting_delay":
+        recipient_first = email.recipient_first_name or _first_name(
+            email.recipient_name
+        )
+        topic = email.meeting_topic or "our meeting"
+        started = _format_clock_time(
+            email.meeting_start_hour, email.meeting_start_minute
+        )
+        delay = _meeting_delay_minutes(state.runtime, email)
+        delay_text = (
+            f"I'm running about {delay} minutes late"
+            if delay is not None and delay > 0
+            else "I'm running late"
+        )
+        return (
+            f"Hi {recipient_first}, I wanted to reach out regarding our {topic} "
+            f"meeting that started at {started} today. {delay_text} and apologize "
+            "for the delay. I should be there shortly. Thank you for your patience. "
+            "Best regards"
+        )
+
+    if email.mode == "share_contact":
+        recipient_first = email.recipient_first_name or _first_name(
+            email.recipient_name
+        )
+        subject_name = email.subject_name
+        if not subject_name or not email.subject_phone or not email.subject_email:
+            return None
+        return (
+            f"Hi {recipient_first},\n\n"
+            f"I wanted to share {subject_name}'s contact information with you:\n\n"
+            f"Name: {subject_name}\n"
+            f"Phone: {email.subject_phone}\n"
+            f"Email: {email.subject_email}\n\n"
+            "Best regards"
+        )
+
+    return None
+
+
+def _format_email_confirmation(email: EmailFlow, extra_recipients: list[str]) -> str:
+    addresses = _email_recipient_addresses(email, extra_recipients)
+    address_list = ", ".join(addresses)
+    return (
+        f"I will send this email to {address_list}:\n\n"
+        f"{email.content_message}\n\n"
+        "Please confirm if I should send it."
+    )
+
+
+def _email_recipient_addresses(
+    email: EmailFlow, extra_recipients: list[str]
+) -> list[str]:
+    addresses = []
+    if email.recipient_email:
+        addresses.append(email.recipient_email)
+    if email.mode == "meeting_delay":
+        for extra in extra_recipients:
+            if extra not in addresses:
+                addresses.append(extra)
+    return addresses
+
+
+def _format_contact_choice_prompt(matches: dict[str, str]) -> str:
+    names = ", ".join(name.title() for name in matches.values())
+    return f"I found multiple matching contacts: {names}. Which one should I use?"
+
+
+def _first_name(name: str | None) -> str:
+    if not name:
+        return "there"
+    return name.split()[0]
+
+
+def _format_clock_time(hour: int | None, minute: int | None) -> str:
+    if hour is None:
+        return "the scheduled time"
+    minute = minute or 0
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _meeting_delay_minutes(runtime: RuntimeContext, email: EmailFlow) -> int | None:
+    if runtime.hour is None or email.meeting_start_hour is None:
+        return None
+    current = runtime.hour * 60 + (runtime.minute or 0)
+    start = email.meeting_start_hour * 60 + (email.meeting_start_minute or 0)
+    return max(0, current - start)
 
 
 def _is_sunroof_open_request(text: str) -> bool:
@@ -2960,10 +3848,38 @@ def _is_navigation_delete_waypoint_request(text: str) -> bool:
     )
 
 
+def _is_navigation_delete_destination_request(text: str) -> bool:
+    if not re.search(r"\b(remove|delete|drop|cancel)\b", text) and not any(
+        marker in text
+        for marker in (
+            "no longer need",
+            "don't need",
+            "do not need",
+            "end my trip at",
+            "end the trip at",
+        )
+    ):
+        return False
+    return bool(
+        "final destination" in text
+        or "last stop" in text
+        or "final stop" in text
+        or re.search(r"\bdelete\b[^.?!]{0,60}\bdestination\b", text)
+        or re.search(r"\bcancel\b[^.?!]{0,60}\bdestination\b", text)
+        or re.search(r"\bdestination\b[^.?!]{0,60}\b(delete|remove|cancel)\b", text)
+    )
+
+
 def _is_navigation_replace_waypoint_request(text: str) -> bool:
     if "final destination" in text or re.search(r"\bdestination\b", text):
         return False
-    if not re.search(r"\b(intermediate stop|waypoint|stop)\b", text):
+    if not (
+        re.search(r"\b(intermediate stop|waypoint|stop)\b", text)
+        or (
+            re.search(r"\b(route|navigation)\b", text)
+            and re.search(r"\breplace\b[^.?!]{0,80}\bwith\b", text)
+        )
+    ):
         return False
     return bool(re.search(r"\b(replace|change|switch|swap)\b", text))
 
@@ -3063,6 +3979,25 @@ def _extract_navigation_waypoint_to_delete(text: str) -> str | None:
     return None
 
 
+def _extract_navigation_destination_to_delete(text: str) -> str | None:
+    location = _location_name_pattern()
+    patterns = (
+        rf"\b(?i:remove|delete|drop|cancel)\s+(?:my\s+|the\s+|current\s+)?(?:final\s+destination|destination|final\s+stop|last\s+stop)?\s*(?:\(\s*)?{location}",
+        rf"\b(?i:no longer need|don't need|do not need)(?:\s+to\s+(?:go|travel|drive|navigate))?(?:\s+to)?\s+{location}",
+        rf"\b{location}\s+(?i:is|as)?\s*(?:my\s+|the\s+)?(?i:final destination|last stop|final stop)[^.?!]{0, 80}\b(?i:remove|delete|drop|cancel|no longer)",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if matches:
+            value = matches[-1]
+            if isinstance(value, tuple):
+                value = value[-1]
+            destination = _clean_location_query(value)
+            if destination:
+                return destination
+    return None
+
+
 def _is_complex_navigation_request(text: str) -> bool:
     complex_markers = (
         "charging station",
@@ -3106,6 +4041,7 @@ def _is_replace_destination_request(text: str) -> bool:
 def _extract_navigation_destination(text: str) -> str | None:
     patterns = (
         r"\b(?i:change|replace|switch|update)\b[^.?!]{0,100}?\b(?i:destination)\b[^.?!]{0,80}?\bto\s+([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})",
+        r"\b(?i:change|replace|switch|update)\b[^.?!]{0,100}?\b(?i:navigation|route)\b[^.?!]{0,80}?\bto\s+([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})",
         r"\b(?i:navigate|drive|go|travel|route)\b[^.?!]{0,80}?\bto\s+([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})",
         r"\b(?i:directions?)\b[^.?!]{0,40}?\bto\s+([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})",
         r"\b(?i:rather go to)\s+([A-Z][A-Za-z]*(?:\s+(?:[A-Z][A-Za-z]*|la|de|del|di|and)){0,4})",
@@ -3143,6 +4079,18 @@ def _clean_location_query(value: str) -> str | None:
     return value
 
 
+def _matching_recent_location_id(
+    requested_name: str | None,
+    candidate_name: str | None,
+    candidate_id: str | None,
+) -> str | None:
+    if not requested_name or not candidate_name or not candidate_id:
+        return None
+    if requested_name.casefold() == candidate_name.casefold():
+        return candidate_id
+    return None
+
+
 def _extract_route_preference(
     text: str,
 ) -> Literal["fastest", "shortest"] | None:
@@ -3150,6 +4098,32 @@ def _extract_route_preference(
         return "fastest"
     if "shortest" in text:
         return "shortest"
+    return None
+
+
+def _extract_route_choice_index(text: str) -> int | None:
+    ordinal_to_index = {
+        "first": 0,
+        "1st": 0,
+        "one": 0,
+        "second": 1,
+        "2nd": 1,
+        "two": 1,
+        "third": 2,
+        "3rd": 2,
+        "three": 2,
+    }
+    if match := re.search(r"\b(?:route|option)\s+([123])\b", text):
+        return int(match.group(1)) - 1
+    if match := re.search(r"\b([123])(?:st|nd|rd)?\s+(?:route|option)\b", text):
+        return int(match.group(1)) - 1
+    for word, index in ordinal_to_index.items():
+        if re.search(rf"\b{word}\s+(?:route|option)\b", text) or re.search(
+            rf"\b(?:route|option)\s+{word}\b", text
+        ):
+            return index
+    if re.search(r"\b(another|different|alternative|other)\s+(?:route|option)\b", text):
+        return 1
     return None
 
 
@@ -3218,6 +4192,33 @@ def _resolve_navigation_waypoint_from_state(navigation: NavigationFlow) -> None:
         navigation.waypoint_id = intermediate_waypoints[0]
 
 
+def _resolve_navigation_final_destination_from_state(
+    navigation: NavigationFlow,
+) -> None:
+    if navigation.destination_id:
+        return
+    if not navigation.waypoints_id:
+        return
+
+    final_destination_id = navigation.waypoints_id[-1]
+    if not navigation.destination_name:
+        navigation.destination_id = final_destination_id
+        return
+
+    normalized = navigation.destination_name.casefold()
+    for waypoint in navigation.waypoint_details:
+        name = waypoint.get("name")
+        waypoint_id = waypoint.get("id")
+        if (
+            isinstance(name, str)
+            and isinstance(waypoint_id, str)
+            and name.casefold() == normalized
+            and waypoint_id == final_destination_id
+        ):
+            navigation.destination_id = waypoint_id
+            return
+
+
 def _navigation_adjacent_waypoints(
     navigation: NavigationFlow, waypoint_id: str
 ) -> tuple[str, str] | None:
@@ -3246,6 +4247,8 @@ def _navigation_completion_message(
         parts.append(f"I used the {route_choice} route.")
     if _route_has_toll(route):
         parts.append("This route includes toll roads.")
+    if route_choice:
+        parts.append("Would you like information on alternative routes?")
     return " ".join(parts)
 
 
@@ -3260,6 +4263,8 @@ def _navigation_multi_route_completion_message(
         parts.append(f"I used the {route_choice} route segments.")
     if any(_route_has_toll(route) for route in routes):
         parts.append("At least one route segment includes toll roads.")
+    if route_choice:
+        parts.append("Would you like information on alternative route segments?")
     return " ".join(parts)
 
 
@@ -3277,6 +4282,12 @@ def _route_choice_label(
             return "fastest"
         if "shortest" in lowered_aliases:
             return "shortest"
+        if "second" in lowered_aliases:
+            return "second"
+        if "third" in lowered_aliases:
+            return "third"
+        if "first" in lowered_aliases:
+            return "first"
     return None
 
 
@@ -3306,6 +4317,30 @@ def _select_route(
     return routes[0] if len(routes) == 1 else None
 
 
+def _select_requested_route(
+    routes: list[dict[str, Any]],
+    preference: Literal["fastest", "shortest"] | None,
+    selected_index: int | None,
+) -> dict[str, Any] | None:
+    if selected_index is not None:
+        if 0 <= selected_index < len(routes):
+            return routes[selected_index]
+        return None
+    return _select_route(routes, preference)
+
+
+def _select_route_by_alias(
+    routes: list[dict[str, Any]], alias: str
+) -> dict[str, Any] | None:
+    for route in routes:
+        aliases = route.get("alias") or []
+        if isinstance(aliases, list) and alias in {
+            str(route_alias).lower() for route_alias in aliases
+        }:
+            return route
+    return None
+
+
 def _route_choice_is_unambiguous(routes: list[dict[str, Any]]) -> bool:
     if len(routes) == 1:
         return True
@@ -3326,6 +4361,17 @@ def _format_route_choice_prompt(routes: list[dict[str, Any]]) -> str:
         and shortest is not None
         and fastest.get("route_id") == shortest.get("route_id")
     ):
+        second_route = _select_route_by_alias(routes, "second")
+        if second_route is None and len(routes) > 1:
+            second_route = routes[1]
+        if second_route is not None and second_route.get("route_id") != fastest.get(
+            "route_id"
+        ):
+            return (
+                f"I found routes. Fastest and shortest: {_route_summary(fastest)}. "
+                f"Second route: {_route_summary(second_route)}. "
+                "Do you want the first route or the second route?"
+            )
         return (
             f"I selected the fastest route: {_route_summary(fastest)}. "
             "It is also the shortest route. Do you want me to apply it, "
@@ -3340,6 +4386,13 @@ def _format_route_choice_prompt(routes: list[dict[str, Any]]) -> str:
             f"I found routes. Fastest: {_route_summary(fastest)}. "
             f"Shortest: {_route_summary(shortest)}.{extra_note} "
             "Do you want the fastest or shortest route?"
+        )
+    if len(routes) > 1:
+        second_route = _select_route_by_alias(routes, "second") or routes[1]
+        return (
+            f"I found routes. First route: {_route_summary(routes[0])}. "
+            f"Second route: {_route_summary(second_route)}. "
+            "Do you want the first route or the second route?"
         )
     return "I found multiple routes. Do you want the fastest or shortest route?"
 
@@ -3574,6 +4627,18 @@ def _tool_result_name(tool_result: dict[str, Any]) -> str:
         or tool_result.get("name")
         or ""
     )
+
+
+def _parse_tool_call_arguments(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _parse_tool_result_content(tool_result: dict[str, Any]) -> dict[str, Any]:

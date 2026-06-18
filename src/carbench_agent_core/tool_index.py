@@ -6,6 +6,13 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .response_renderer import (
+    render_malformed_tool_arguments,
+    render_missing_capability,
+    render_missing_required_information,
+    render_unavailable_control,
+)
+
 
 @dataclass(frozen=True)
 class ToolIndex:
@@ -50,26 +57,45 @@ class ToolIndex:
         properties = params.get("properties") or {}
         return {arg for arg in properties if isinstance(arg, str)}
 
+    def arg_schema(self, name: str, arg: str) -> dict[str, Any]:
+        tool = self.get(name)
+        if not tool:
+            return {}
+        params = tool.get("function", {}).get("parameters", {})
+        properties = params.get("properties") or {}
+        schema = properties.get(arg)
+        return schema if isinstance(schema, dict) else {}
+
     def validate_call(self, name: str, arguments: dict[str, Any]) -> str | None:
         """Return a user-safe validation error or None if the call is available."""
 
         if not self.has(name):
-            return f"I can't do that because the {name} capability is not available right now."
+            return render_missing_capability()
 
         if not isinstance(arguments, dict):
-            return f"I can't use {name} because its arguments are malformed."
+            return render_malformed_tool_arguments()
 
         required_missing = sorted(self.required_args(name) - set(arguments))
         if required_missing:
-            missing = ", ".join(required_missing)
-            return f"I can't use {name} yet because the required {missing} information is missing."
+            return render_missing_required_information()
 
         allowed = self.arg_names(name)
         if allowed:
             unknown = sorted(set(arguments) - allowed)
             if unknown:
-                extra = ", ".join(unknown)
-                return f"I can't use {name} with unsupported {extra} information."
+                return render_unavailable_control()
+
+            for arg_name, value in arguments.items():
+                schema = self.arg_schema(name, arg_name)
+                enum_values = schema.get("enum")
+                if isinstance(enum_values, list) and value not in enum_values:
+                    return render_unavailable_control()
+
+                schema_type = schema.get("type")
+                if isinstance(schema_type, str) and not _matches_schema_type(
+                    value, schema_type
+                ):
+                    return render_unavailable_control()
 
         return None
 
@@ -88,3 +114,21 @@ def parse_tool_arguments(raw_arguments: Any) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _matches_schema_type(value: Any, schema_type: str) -> bool:
+    if schema_type == "string":
+        return isinstance(value, str)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "array":
+        return isinstance(value, list)
+    if schema_type == "object":
+        return isinstance(value, dict)
+    if schema_type == "null":
+        return value is None
+    return True

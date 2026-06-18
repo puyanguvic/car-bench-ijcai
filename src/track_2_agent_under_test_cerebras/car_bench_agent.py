@@ -17,6 +17,12 @@ from google.protobuf.json_format import MessageToDict
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from carbench_agent_core import NextAction, PolicyAwareController, ToolIndex
+from carbench_agent_core.response_renderer import (
+    clean_user_content as _clean_user_content,
+    render_malformed_action,
+    render_malformed_tool_arguments,
+    render_malformed_tool_call,
+)
 from logging_utils import configure_logger
 from tool_call_types import ToolCall, ToolCallsData
 from turn_metrics import (
@@ -31,6 +37,7 @@ from turn_metrics import (
     THINKING_TOKENS,
     TURN_METRICS_KEY,
 )
+
 sys.path.pop(0)
 
 if __package__:
@@ -91,7 +98,7 @@ def _validated_next_action(
     if next_action.get("action") != "tool_calls":
         return {
             "action": "respond",
-            "content": "I can't safely continue because the selected action was malformed.",
+            "content": render_malformed_action(),
             "tool_calls": [],
         }
 
@@ -99,7 +106,7 @@ def _validated_next_action(
     if not isinstance(tool_calls, list) or not tool_calls:
         return {
             "action": "respond",
-            "content": "I can't safely continue because the tool call was malformed.",
+            "content": render_malformed_tool_call(),
             "tool_calls": [],
         }
 
@@ -108,7 +115,7 @@ def _validated_next_action(
         if not isinstance(tool_call, dict):
             return {
                 "action": "respond",
-                "content": "I can't safely continue because the tool call was malformed.",
+                "content": render_malformed_tool_call(),
                 "tool_calls": [],
             }
         name = tool_call.get("tool_name")
@@ -116,13 +123,13 @@ def _validated_next_action(
         if not isinstance(name, str) or not name:
             return {
                 "action": "respond",
-                "content": "I can't safely use that tool because the tool name was malformed.",
+                "content": render_malformed_tool_call(),
                 "tool_calls": [],
             }
         if not isinstance(arguments, dict):
             return {
                 "action": "respond",
-                "content": f"I can't safely use {name} because the tool arguments were malformed.",
+                "content": render_malformed_tool_arguments(),
                 "tool_calls": [],
             }
 
@@ -136,11 +143,6 @@ def _validated_next_action(
         validated_calls.append({"tool_name": name, "arguments": arguments})
 
     return {"action": "tool_calls", "content": "", "tool_calls": validated_calls}
-
-
-def _clean_user_content(content: str) -> str:
-    content = content.replace("\u200b", "").replace("\xa0", " ")
-    return "\n".join(line.strip() for line in content.splitlines() if line.strip())
 
 
 @dataclass
@@ -293,10 +295,7 @@ class CARBenchAgentExecutor(AgentExecutor):
             )
 
             has_tool_calls = bool(assistant_message_for_history.get("tool_calls"))
-            if (
-                not has_tool_calls
-                and context.context_id in self.ctx_id_to_turn_metrics
-            ):
+            if not has_tool_calls and context.context_id in self.ctx_id_to_turn_metrics:
                 metrics = self._public_turn_metrics(
                     self.ctx_id_to_turn_metrics.pop(context.context_id)
                 )
@@ -503,9 +502,11 @@ class CARBenchAgentExecutor(AgentExecutor):
         user_message_text: str | None,
         incoming_tool_results: list[dict[str, Any]] | None,
     ) -> None:
-        if messages and messages[-1].get("role") == "assistant" and messages[
-            -1
-        ].get("tool_calls"):
+        if (
+            messages
+            and messages[-1].get("role") == "assistant"
+            and messages[-1].get("tool_calls")
+        ):
             prev_tool_calls = messages[-1]["tool_calls"]
             tool_results = _format_tool_results(
                 prev_tool_calls=prev_tool_calls,
@@ -544,11 +545,7 @@ class CARBenchAgentExecutor(AgentExecutor):
             )
             tool_calls_data.append(ToolCall(tool_name=name, arguments=arguments))
 
-        parts = [
-            new_data_part(
-                ToolCallsData(tool_calls=tool_calls_data).model_dump()
-            )
-        ]
+        parts = [new_data_part(ToolCallsData(tool_calls=tool_calls_data).model_dump())]
         return parts, {
             "role": "assistant",
             "content": None,
@@ -590,9 +587,7 @@ class CARBenchAgentExecutor(AgentExecutor):
         metrics[QUOTA_WAIT_TIME_MS] += quota_wait_ms
         num_calls = metrics[NUM_LLM_CALLS]
         metrics[AVG_LLM_CALL_TIME_MS] = (
-            round(metrics["_total_llm_time_ms"] / num_calls, 1)
-            if num_calls
-            else 0.0
+            round(metrics["_total_llm_time_ms"] / num_calls, 1) if num_calls else 0.0
         )
         metrics[NUM_PASSES] = max(metrics.get(NUM_PASSES, 1), max(internal_calls, 1))
 
@@ -667,6 +662,10 @@ def build_next_action_prompt(
             "Use only the tool definitions in available_tools.",
             "Do not invent tool observations.",
             "If a capability or parameter is unavailable, respond to the user transparently.",
+            "If choosing tool_calls, keep content empty and do not explain the tool call.",
+            "If asking the user, ask exactly one concrete question.",
+            "If confirming completion, mention only actions actually completed by tool results.",
+            "Do not mention schemas, parameter names, evaluator behavior, or hidden implementation details.",
             "Keep user-facing responses short and TTS-friendly.",
             "Respect all policies in the system/wiki message inside the transcript.",
         ],
@@ -716,17 +715,13 @@ def parse_next_action(text: str) -> dict[str, Any]:
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise MalformedModelResponseError(
-                f"No JSON object found in: {text[:200]}"
-            )
+            raise MalformedModelResponseError(f"No JSON object found in: {text[:200]}")
         payload = json.loads(text[start : end + 1])
 
     if payload.get("action") == "respond":
         content = payload.get("content")
         if not isinstance(content, str):
-            raise MalformedModelResponseError(
-                "respond action requires string content"
-            )
+            raise MalformedModelResponseError("respond action requires string content")
         return {"action": "respond", "content": content}
 
     if payload.get("action") == "tool_calls":
@@ -738,9 +733,7 @@ def parse_next_action(text: str) -> dict[str, Any]:
         normalized = []
         for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
-                raise MalformedModelResponseError(
-                    "each tool call must be an object"
-                )
+                raise MalformedModelResponseError("each tool call must be an object")
             tool_name = tool_call.get("tool_name")
             arguments = tool_call.get("arguments")
             if arguments is None and "arguments_json" in tool_call:
@@ -748,9 +741,7 @@ def parse_next_action(text: str) -> dict[str, Any]:
             if arguments is None:
                 arguments = {}
             if not isinstance(tool_name, str) or not tool_name:
-                raise MalformedModelResponseError(
-                    "each tool call requires tool_name"
-                )
+                raise MalformedModelResponseError("each tool call requires tool_name")
             if not isinstance(arguments, dict):
                 raise MalformedModelResponseError(
                     "tool call arguments must be an object"
@@ -763,9 +754,7 @@ def parse_next_action(text: str) -> dict[str, Any]:
 
 def _parse_tool_arguments_json(arguments_json: Any) -> dict[str, Any]:
     if not isinstance(arguments_json, str):
-        raise MalformedModelResponseError(
-            "tool call arguments_json must be a string"
-        )
+        raise MalformedModelResponseError("tool call arguments_json must be a string")
     if not arguments_json.strip():
         return {}
     try:
@@ -807,7 +796,7 @@ NEXT_ACTION_OUTPUT_SCHEMA = {
                         "type": "string",
                         "description": (
                             "JSON object string containing the tool arguments, "
-                            "for example \"{}\" or \"{\\\"position\\\":50}\"."
+                            'for example "{}" or "{\\"position\\":50}".'
                         ),
                     },
                 },
@@ -824,6 +813,10 @@ Use only the supplied CAR-bench tool definitions.
 Return only JSON matching the requested schema.
 Never invent unavailable tools, parameters, or tool results.
 For tool calls, put arguments in arguments_json as a JSON object string.
+For tool-call actions, keep content empty and do not explain the tool call.
 For missing capability or missing information, tell the user transparently.
+When asking the user, ask exactly one concrete question.
+When confirming completion, mention only actions actually completed by tool results.
+Do not mention schemas, parameter names, evaluator behavior, or hidden implementation details.
 Keep spoken responses short, natural, and TTS-friendly.
 Respect confirmation and disambiguation policy from the wiki/system prompt."""
