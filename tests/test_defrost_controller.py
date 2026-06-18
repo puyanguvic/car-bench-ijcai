@@ -3,13 +3,21 @@ import json
 from carbench_agent_core import PolicyAwareController
 
 
-def fake_tool(name: str) -> dict:
+def fake_tool(
+    name: str,
+    properties: dict | None = None,
+    required: list[str] | None = None,
+) -> dict:
     return {
         "type": "function",
         "function": {
             "name": name,
             "description": "",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {
+                "type": "object",
+                "properties": properties or {},
+                "required": required or [],
+            },
         },
     }
 
@@ -25,11 +33,23 @@ def defrost_tools() -> list[dict]:
     return [
         fake_tool("get_climate_settings"),
         fake_tool("get_vehicle_window_positions"),
-        fake_tool("open_close_window"),
-        fake_tool("set_fan_speed"),
-        fake_tool("set_fan_airflow_direction"),
-        fake_tool("set_air_conditioning"),
-        fake_tool("set_window_defrost"),
+        fake_tool(
+            "open_close_window",
+            {"window": {"type": "string"}, "percentage": {"type": "number"}},
+            ["window", "percentage"],
+        ),
+        fake_tool("set_fan_speed", {"level": {"type": "integer"}}, ["level"]),
+        fake_tool(
+            "set_fan_airflow_direction",
+            {"direction": {"type": "string"}},
+            ["direction"],
+        ),
+        fake_tool("set_air_conditioning", {"on": {"type": "boolean"}}, ["on"]),
+        fake_tool(
+            "set_window_defrost",
+            {"on": {"type": "boolean"}, "defrost_window": {"type": "string"}},
+            ["on", "defrost_window"],
+        ),
     ]
 
 
@@ -353,3 +373,95 @@ def test_front_defrost_controller_stops_when_window_status_is_partial() -> None:
     assert action is not None
     assert action.action == "respond"
     assert "couldn't determine all window positions" in action.content.lower()
+
+
+def test_window_match_to_passenger_rear_then_front_defrost() -> None:
+    controller = PolicyAwareController()
+    messages = [{"role": "system", "content": ""}]
+    tools = defrost_tools()
+
+    action = controller.decide(
+        context_id="ctx-window-match-front-defrost",
+        messages=messages,
+        tools=tools,
+        latest_user_text=(
+            "Close all windows to match the current position of the passenger "
+            "rear window, then activate the front window defrost."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_vehicle_window_positions", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-window-match-front-defrost",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_vehicle_window_positions",
+                {
+                    "window_driver_position": 25,
+                    "window_passenger_position": 50,
+                    "window_driver_rear_position": 25,
+                    "window_passenger_rear_position": 5,
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_climate_settings", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-window-match-front-defrost",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[tool_result("get_climate_settings", climate_result())],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "open_close_window", "arguments": {"window": "ALL", "percentage": 5}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-window-match-front-defrost",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("open_close_window", {"window": "ALL", "percentage": 5})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "set_fan_speed", "arguments": {"level": 2}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-window-match-front-defrost-followup",
+        messages=messages,
+        tools=tools,
+        latest_user_text=(
+            "Were all the windows adjusted to match the passenger rear window?"
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_vehicle_window_positions", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-window-match-front-defrost-followup",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_vehicle_window_positions",
+                {
+                    "window_driver_position": 5,
+                    "window_passenger_position": 5,
+                    "window_driver_rear_position": 5,
+                    "window_passenger_rear_position": 5,
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "all windows match the passenger rear window" in action.content.lower()

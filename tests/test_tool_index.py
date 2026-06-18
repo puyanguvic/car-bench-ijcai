@@ -51,6 +51,14 @@ def test_tool_index_validation_rejects_unknown_arguments_without_leaking_names()
     assert "extra" not in error
 
 
+def test_tool_index_validation_rejects_arguments_for_no_arg_tool() -> None:
+    index = ToolIndex([fake_tool("get_status")])
+
+    error = index.validate_call("get_status", {"": {}})
+
+    assert error == "I can't complete this request with the available controls."
+
+
 def test_tool_index_validation_rejects_missing_required_argument() -> None:
     index = ToolIndex(
         [

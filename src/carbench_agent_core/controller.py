@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -103,6 +104,9 @@ class WindowFlow:
 @dataclass
 class WindowMatchFlow:
     active: bool = False
+    reference_window: Literal["FRONT", "PASSENGER_REAR"] = "FRONT"
+    all_windows: bool = False
+    followup_defrost_window: Literal["ALL", "FRONT", "REAR"] | None = None
     windows_checked: bool = False
     window_driver_position: int | None = None
     window_passenger_position: int | None = None
@@ -136,6 +140,7 @@ class AirCirculationFlow:
     active: bool = False
     mode: Literal["FRESH_AIR", "RECIRCULATION", "AUTO"] | None = None
     preferences_checked: bool = False
+    combined_with_air_conditioning: bool = False
     completed: bool = False
 
 
@@ -247,6 +252,28 @@ class NavigationFlow:
 
 
 @dataclass
+class POIFlow:
+    active: bool = False
+    category: str = "restaurants"
+    location_name: str | None = None
+    location_id: str | None = None
+    pois_checked: bool = False
+    pois: list[dict[str, Any]] = field(default_factory=list)
+    selected_poi_id: str | None = None
+    selected_poi_name: str | None = None
+    routes_checked: bool = False
+    routes: list[dict[str, Any]] = field(default_factory=list)
+    route_choice_requested: bool = False
+    route_preference: Literal["fastest", "shortest"] | None = None
+    selected_route_index: int | None = None
+    replace_final_destination: bool = False
+    do_not_set_navigation: bool = False
+    completion_message: str | None = None
+    completed: bool = False
+    failure_message: str | None = None
+
+
+@dataclass
 class EmailFlow:
     active: bool = False
     mode: Literal["meeting_delay", "share_contact"] | None = None
@@ -345,6 +372,7 @@ class ControllerState:
         default_factory=ReadingLightOccupancyFlow
     )
     navigation: NavigationFlow = field(default_factory=NavigationFlow)
+    poi: POIFlow = field(default_factory=POIFlow)
     email: EmailFlow = field(default_factory=EmailFlow)
     high_beam: HighBeamFlow = field(default_factory=HighBeamFlow)
     fog_lights: FogLightFlow = field(default_factory=FogLightFlow)
@@ -389,6 +417,8 @@ class PolicyAwareController:
         if latest_tool_results:
             self._observe_tool_results(state, latest_tool_results)
 
+        self._clear_completed_flows_with_pending_work(state)
+
         action: NextAction | None = None
         if state.sunroof.active:
             action = self._next_sunroof_action(state, tool_index)
@@ -402,10 +432,10 @@ class PolicyAwareController:
             action = self._next_ambient_light_action(state, tool_index)
         elif state.trunk.active:
             action = self._next_trunk_action(state, tool_index)
-        elif state.air_circulation.active:
-            action = self._next_air_circulation_action(state, tool_index)
         elif state.air_conditioning.active:
             action = self._next_air_conditioning_action(state, tool_index)
+        elif state.air_circulation.active:
+            action = self._next_air_circulation_action(state, tool_index)
         elif state.air_quality.active:
             action = self._next_air_quality_action(state, tool_index)
         elif state.fan_speed.active:
@@ -418,6 +448,8 @@ class PolicyAwareController:
             action = self._next_reading_light_action(state, tool_index)
         elif state.defrost.active:
             action = self._next_defrost_action(state, tool_index)
+        elif state.poi.active:
+            action = self._next_poi_action(state, tool_index)
         elif state.navigation.active:
             action = self._next_navigation_action(state, tool_index)
         elif state.email.active:
@@ -473,6 +505,66 @@ class PolicyAwareController:
                 )
 
         return action
+
+    def _clear_completed_flows_with_pending_work(self, state: ControllerState) -> None:
+        pending = [
+            state.sunroof.active and not state.sunroof.completed,
+            state.sunshade.active and not state.sunshade.completed,
+            state.window_match.active and not state.window_match.completed,
+            state.window.active and not state.window.completed,
+            state.ambient_light.active and not state.ambient_light.completed,
+            state.trunk.active and not state.trunk.completed,
+            state.air_conditioning.active and not state.air_conditioning.completed,
+            state.air_circulation.active and not state.air_circulation.completed,
+            state.fan_speed.active and not state.fan_speed.completed,
+            state.steering_wheel_heating.active
+            and not state.steering_wheel_heating.completed,
+            state.defrost.active and not state.defrost.completed,
+            state.poi.active and not state.poi.completed,
+            state.navigation.active and not state.navigation.completed,
+            state.email.active and not state.email.completed,
+        ]
+        if not any(pending):
+            return
+
+        if state.window.completed:
+            state.window = WindowFlow()
+        if state.air_circulation.completed:
+            state.air_circulation = AirCirculationFlow()
+        if state.air_conditioning.completed:
+            state.air_conditioning = AirConditioningFlow()
+        if state.fan_speed.completed:
+            state.fan_speed = FanSpeedFlow()
+        if state.steering_wheel_heating.completed:
+            state.steering_wheel_heating = SteeringWheelHeatingFlow()
+        if state.poi.completed:
+            state.poi = POIFlow()
+
+    def _reset_completed_flows_for_new_intent(self, state: ControllerState) -> None:
+        if state.sunroof.completed:
+            state.sunroof = SunroofFlow()
+        if state.sunshade.completed:
+            state.sunshade = SunshadeFlow()
+        if state.window_match.completed:
+            state.window_match = WindowMatchFlow()
+        if state.window.completed:
+            state.window = WindowFlow()
+        if state.ambient_light.completed:
+            state.ambient_light = AmbientLightFlow()
+        if state.trunk.completed:
+            state.trunk = TrunkFlow()
+        if state.air_circulation.completed:
+            state.air_circulation = AirCirculationFlow()
+        if state.air_conditioning.completed:
+            state.air_conditioning = AirConditioningFlow()
+        if state.fan_speed.completed:
+            state.fan_speed = FanSpeedFlow()
+        if state.steering_wheel_heating.completed:
+            state.steering_wheel_heating = SteeringWheelHeatingFlow()
+        if state.defrost.completed:
+            state.defrost = DefrostFlow()
+        if state.poi.completed:
+            state.poi = POIFlow()
 
     def _sync_runtime_context(
         self, state: ControllerState, messages: list[dict[str, Any]]
@@ -535,6 +627,9 @@ class PolicyAwareController:
 
         if "###stop###" in lowered:
             return
+
+        if _contains_new_action_intent(lowered):
+            self._reset_completed_flows_for_new_intent(state)
 
         quoted_meeting = _extract_quoted_meeting_topic(text)
         if quoted_meeting is not None:
@@ -735,6 +830,31 @@ class PolicyAwareController:
                 navigation.route_choice_requested = False
                 return
 
+        if state.poi.active and _is_navigation_delete_destination_request(lowered):
+            state.poi = POIFlow()
+
+        poi = state.poi
+        if poi.active:
+            if poi.route_choice_requested:
+                route_index = _extract_route_choice_index(lowered)
+                if route_index is None:
+                    route_index = _select_route_index_by_via(poi.routes, lowered)
+                if route_index is not None:
+                    poi.selected_route_index = route_index
+                    poi.route_choice_requested = False
+                    return
+                route_preference = _extract_route_preference(lowered)
+                if route_preference is not None:
+                    poi.route_preference = route_preference
+                    poi.route_choice_requested = False
+                    return
+            if poi.selected_poi_id is None and poi.pois:
+                selected = _select_poi_from_text(poi.pois, text)
+                if selected is not None:
+                    poi.selected_poi_id = selected.get("id")
+                    poi.selected_poi_name = selected.get("name")
+                    return
+
         if _is_sunroof_open_request(lowered):
             state.sunroof = SunroofFlow(
                 active=True,
@@ -746,13 +866,32 @@ class PolicyAwareController:
                 target_percentage=_extract_sunshade_percentage(lowered),
             )
         elif _is_window_match_request(lowered):
-            state.window_match = WindowMatchFlow(active=True)
+            state.window_match = WindowMatchFlow(
+                active=True,
+                reference_window=_extract_window_match_reference(lowered),
+                all_windows="all windows" in lowered,
+                followup_defrost_window=(
+                    _extract_defrost_window(lowered) if "defrost" in lowered else None
+                ),
+            )
         elif _is_window_open_request(lowered):
             state.window = WindowFlow(
                 active=True,
                 window=_extract_window_target(lowered),
                 target_percentage=_extract_window_percentage(lowered),
             )
+            if _is_air_conditioning_request(lowered):
+                state.air_conditioning = AirConditioningFlow(
+                    active=True,
+                    on=not _is_air_conditioning_off_request(lowered),
+                    fan_target_level=_extract_level(lowered),
+                )
+            if _is_air_circulation_request(lowered):
+                state.air_circulation = AirCirculationFlow(
+                    active=True,
+                    mode=_extract_air_circulation_mode(lowered),
+                    combined_with_air_conditioning=True,
+                )
         elif _is_ambient_light_request(lowered):
             state.ambient_light = AmbientLightFlow(
                 active=True,
@@ -765,16 +904,22 @@ class PolicyAwareController:
                 active=True,
                 action="CLOSE" if _is_close_request(lowered) else "OPEN",
             )
-        elif _is_air_circulation_request(lowered):
-            state.air_circulation = AirCirculationFlow(
-                active=True,
-                mode=_extract_air_circulation_mode(lowered),
-            )
         elif _is_air_conditioning_request(lowered):
             state.air_conditioning = AirConditioningFlow(
                 active=True,
                 on=not _is_air_conditioning_off_request(lowered),
                 fan_target_level=_extract_level(lowered),
+            )
+            if _is_air_circulation_request(lowered):
+                state.air_circulation = AirCirculationFlow(
+                    active=True,
+                    mode=_extract_air_circulation_mode(lowered),
+                    combined_with_air_conditioning=True,
+                )
+        elif _is_air_circulation_request(lowered):
+            state.air_circulation = AirCirculationFlow(
+                active=True,
+                mode=_extract_air_circulation_mode(lowered),
             )
         elif _is_air_quality_question(lowered):
             state.air_quality = AirQualityFlow(active=True)
@@ -805,6 +950,23 @@ class PolicyAwareController:
                 active=True,
                 on=not _is_light_off_request(lowered),
                 defrost_window=_extract_defrost_window(lowered),
+            )
+        elif _is_poi_request(lowered):
+            location_name = _extract_poi_location(text)
+            state.poi = POIFlow(
+                active=True,
+                category=_extract_poi_category(lowered),
+                location_name=location_name,
+                location_id=(
+                    state.runtime.location_id
+                    if location_name is None and _is_nearby_poi_request(lowered)
+                    else None
+                ),
+                route_preference=_extract_route_preference(lowered),
+                replace_final_destination=_is_replace_destination_request(lowered)
+                or "changed my mind" in lowered
+                or "instead" in lowered,
+                do_not_set_navigation=_do_not_set_navigation(lowered),
             )
         elif _is_navigation_delete_destination_request(lowered):
             previous_navigation = state.navigation
@@ -1268,10 +1430,16 @@ class PolicyAwareController:
                         )
                         state.recent_location_lookup_id = result["id"]
                         state.pending_location_lookup_name = None
-                    if state.navigation.mode == "replace_one_waypoint":
-                        state.navigation.new_waypoint_id = result["id"]
-                    else:
-                        state.navigation.destination_id = result["id"]
+                    if state.poi.active and state.poi.location_id is None:
+                        state.poi.location_id = result["id"]
+                    if state.navigation.active:
+                        if state.navigation.mode == "replace_one_waypoint":
+                            state.navigation.new_waypoint_id = result["id"]
+                        else:
+                            state.navigation.destination_id = result["id"]
+                elif state.poi.active and state.poi.location_id is None:
+                    location = state.poi.location_name or "that location"
+                    state.poi.failure_message = f"I couldn't find {location}."
                 elif state.navigation.active:
                     destination = (
                         state.navigation.new_waypoint_name
@@ -1281,6 +1449,21 @@ class PolicyAwareController:
                     state.navigation.failure_message = (
                         f"I couldn't find a location ID for {destination}."
                     )
+            elif name == "search_poi_at_location":
+                if state.poi.active:
+                    state.poi.pois_checked = True
+                    if isinstance(result, dict) and isinstance(
+                        result.get("pois_found"), list
+                    ):
+                        state.poi.pois = [
+                            poi
+                            for poi in result["pois_found"]
+                            if isinstance(poi, dict)
+                        ]
+                    if not state.poi.pois:
+                        state.poi.failure_message = (
+                            "I couldn't find matching places there."
+                        )
             elif name == "get_contact_id_by_contact_name":
                 if state.email.active:
                     _record_email_contact_matches(state.email, result)
@@ -1292,11 +1475,26 @@ class PolicyAwareController:
                     routes = [
                         route for route in result["routes"] if isinstance(route, dict)
                     ]
-                    _record_navigation_routes(state.navigation, routes)
+                    if state.poi.active and state.poi.selected_poi_id is not None:
+                        state.poi.routes_checked = True
+                        state.poi.routes = routes
+                    else:
+                        _record_navigation_routes(state.navigation, routes)
                     if not routes:
-                        state.navigation.failure_message = (
-                            "I couldn't find a route to that destination."
-                        )
+                        if state.poi.active and state.poi.selected_poi_id is not None:
+                            state.poi.failure_message = (
+                                "I couldn't find a route to that destination."
+                            )
+                        else:
+                            state.navigation.failure_message = (
+                                "I couldn't find a route to that destination."
+                            )
+                elif state.poi.active and state.poi.selected_poi_id is not None:
+                    state.poi.routes_checked = True
+                    state.poi.routes = []
+                    state.poi.failure_message = (
+                        "I couldn't find a route to that destination."
+                    )
                 elif state.navigation.active:
                     _record_navigation_routes(state.navigation, [])
                     state.navigation.failure_message = (
@@ -1310,6 +1508,8 @@ class PolicyAwareController:
                 "navigation_replace_one_waypoint",
             } and isinstance(result, dict):
                 state.navigation.completed = True
+                if state.poi.active and state.poi.replace_final_destination:
+                    state.poi.completed = True
                 waypoints = result.get("new_waypoints")
                 if isinstance(waypoints, list):
                     state.navigation.waypoints_id = [
@@ -1521,7 +1721,7 @@ class PolicyAwareController:
         if match.completed:
             state.window_match = WindowMatchFlow()
             return NextAction.respond(
-                "Done, the rear windows match the front windows.",
+                _window_match_completion_message(match),
                 reason="window_match_done",
             )
 
@@ -1552,6 +1752,51 @@ class PolicyAwareController:
                 "I can't match the rear windows because I couldn't determine all current window positions.",
                 reason="window_match_unknown_positions",
             )
+
+        if match.reference_window == "PASSENGER_REAR":
+            target = match.window_passenger_rear_position
+            if match.followup_defrost_window is not None and not state.defrost.climate_checked:
+                if not tool_index.has("get_climate_settings"):
+                    return NextAction.respond(
+                        "I can't safely continue to defrost because the climate settings check is unavailable right now.",
+                        reason="window_match_defrost_missing_climate_tool",
+                    )
+                return NextAction.tool_call(
+                    "get_climate_settings",
+                    reason="window_match_defrost_climate_check",
+                )
+            if not _tool_argument_available(tool_index, "open_close_window", "window"):
+                return NextAction.respond(
+                    "I can't match the windows because the required window selector is unavailable right now.",
+                    reason="window_match_missing_window_parameter",
+                )
+            if not _tool_argument_available(tool_index, "open_close_window", "percentage"):
+                return NextAction.respond(
+                    "I can't match the windows because the required window position control is unavailable right now.",
+                    reason="window_match_missing_percentage_parameter",
+                )
+            if any(
+                position != target
+                for position in (
+                    match.window_driver_position,
+                    match.window_passenger_position,
+                    match.window_driver_rear_position,
+                    match.window_passenger_rear_position,
+                )
+            ):
+                return NextAction.tool_call(
+                    "open_close_window",
+                    {"window": "ALL", "percentage": target},
+                    reason="window_match_all_to_passenger_rear",
+                )
+            if match.followup_defrost_window is not None:
+                state.defrost.active = True
+                state.defrost.defrost_window = match.followup_defrost_window
+                state.defrost.windows_checked = True
+                state.window_match = WindowMatchFlow()
+                return self._next_defrost_action(state, tool_index)
+            match.completed = True
+            return self._next_window_match_action(state, tool_index)
 
         if match.window_driver_position != match.window_passenger_position:
             return NextAction.respond(
@@ -1705,6 +1950,12 @@ class PolicyAwareController:
         air = state.air_circulation
 
         if air.completed:
+            if air.combined_with_air_conditioning:
+                return NextAction.respond(
+                    "Done, the air conditioning is on and air circulation is set to "
+                    f"{_friendly_air_mode(air.mode)}.",
+                    reason="air_circulation_done",
+                )
             return NextAction.respond(
                 f"Done, air circulation is set to {_friendly_air_mode(air.mode)}.",
                 reason="air_circulation_done",
@@ -1825,7 +2076,7 @@ class PolicyAwareController:
                     "I can't safely close the open windows because the required window position control is unavailable right now.",
                     reason="air_conditioning_missing_percentage_parameter",
                 )
-            window, _ = open_windows[0]
+            window = "ALL" if len(open_windows) == 4 else open_windows[0][0]
             return NextAction.tool_call(
                 "open_close_window",
                 {"window": window, "percentage": 0},
@@ -2576,6 +2827,147 @@ class PolicyAwareController:
             {"on": True, "defrost_window": defrost.defrost_window},
             reason="defrost_set",
         )
+
+    def _next_poi_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        poi = state.poi
+
+        if poi.completed:
+            message = poi.completion_message or "Done, the navigation is updated."
+            state.poi = POIFlow()
+            return NextAction.respond(message, reason="poi_done")
+
+        if poi.failure_message:
+            message = poi.failure_message
+            state.poi = POIFlow()
+            return NextAction.respond(message, reason="poi_failed")
+
+        if poi.location_id is None:
+            if poi.location_name is None:
+                return NextAction.respond(
+                    "Which location should I search in?",
+                    reason="poi_missing_location",
+                )
+            if not tool_index.has("get_location_id_by_location_name"):
+                return NextAction.respond(
+                    "I can't look up that location because location search is unavailable right now.",
+                    reason="poi_missing_location_tool",
+                )
+            return NextAction.tool_call(
+                "get_location_id_by_location_name",
+                {"location": poi.location_name},
+                reason="poi_location_lookup",
+            )
+
+        if not poi.pois_checked:
+            if not tool_index.has("search_poi_at_location"):
+                return NextAction.respond(
+                    "I can't search for places because place search is unavailable right now.",
+                    reason="poi_missing_search_tool",
+                )
+            return NextAction.tool_call(
+                "search_poi_at_location",
+                {"category_poi": poi.category, "location_id": poi.location_id},
+                reason="poi_search",
+            )
+
+        if poi.selected_poi_id is None:
+            if len(poi.pois) == 1:
+                selected = poi.pois[0]
+                poi.selected_poi_id = selected.get("id")
+                poi.selected_poi_name = selected.get("name")
+            else:
+                return NextAction.respond(
+                    _format_poi_choice_prompt(poi.category, poi.pois),
+                    reason="poi_choice",
+                )
+
+        if poi.selected_poi_id is None:
+            return NextAction.respond(
+                "Which place would you like directions to?",
+                reason="poi_missing_choice",
+            )
+
+        if not poi.routes_checked:
+            if state.runtime.location_id is None:
+                return NextAction.respond(
+                    "I need the current location before I can find a route.",
+                    reason="poi_missing_start",
+                )
+            if not tool_index.has("get_routes_from_start_to_destination"):
+                return NextAction.respond(
+                    "I can't find a route because route search is unavailable right now.",
+                    reason="poi_missing_route_tool",
+                )
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": state.runtime.location_id,
+                    "destination_id": poi.selected_poi_id,
+                },
+                reason="poi_route_lookup",
+            )
+
+        selected_route = _select_requested_route(
+            poi.routes,
+            poi.route_preference,
+            poi.selected_route_index,
+        )
+        if poi.do_not_set_navigation and selected_route is None and poi.routes:
+            selected_route = _select_route(poi.routes, "fastest") or poi.routes[0]
+
+        if selected_route is None:
+            if len(poi.routes) == 1:
+                selected_route = poi.routes[0]
+            else:
+                poi.route_choice_requested = True
+                return NextAction.respond(
+                    _format_route_choice_prompt(poi.routes),
+                    reason="poi_route_disambiguation",
+                )
+
+        route_id = selected_route.get("route_id")
+        if not isinstance(route_id, str) or not route_id:
+            return NextAction.respond(
+                "I can't safely set that route because the route ID is missing.",
+                reason="poi_missing_route_id",
+            )
+
+        if poi.do_not_set_navigation:
+            poi.completed = True
+            poi.completion_message = (
+                f"The selected route to {poi.selected_poi_name or 'that place'} is "
+                f"{_route_summary(selected_route)}."
+            )
+            return self._next_poi_action(state, tool_index)
+
+        if poi.replace_final_destination:
+            if not tool_index.has("navigation_replace_final_destination"):
+                return NextAction.respond(
+                    "I can't replace the destination because that navigation edit control is unavailable right now.",
+                    reason="poi_missing_replace_destination_tool",
+                )
+            poi.completion_message = _navigation_completion_message(
+                "the navigation destination is updated",
+                selected_route,
+                poi.route_preference,
+            )
+            return NextAction.tool_call(
+                "navigation_replace_final_destination",
+                {
+                    "new_destination_id": poi.selected_poi_id,
+                    "route_id_leading_to_new_destination": route_id,
+                },
+                reason="poi_replace_navigation_destination",
+            )
+
+        poi.completed = True
+        poi.completion_message = (
+            f"The route to {poi.selected_poi_name or 'that place'} is "
+            f"{_route_summary(selected_route)}."
+        )
+        return self._next_poi_action(state, tool_index)
 
     def _next_navigation_action(
         self, state: ControllerState, tool_index: ToolIndex
@@ -3472,6 +3864,22 @@ def _meeting_delay_minutes(runtime: RuntimeContext, email: EmailFlow) -> int | N
     return max(0, current - start)
 
 
+def _contains_new_action_intent(text: str) -> bool:
+    stripped = text.strip().lower()
+    if stripped in {"yes", "yeah", "yep", "sure", "ok", "okay", "no", "nope"}:
+        return False
+
+    return bool(
+        re.search(
+            r"\b(open|close|shut|turn|switch|set|change|replace|update|adjust|"
+            r"activate|deactivate|navigate|drive|route|find|search|look for|"
+            r"delete|remove|cancel|send|email|match)\b",
+            stripped,
+        )
+        or "what about" in stripped
+    )
+
+
 def _is_sunroof_open_request(text: str) -> bool:
     if "sunroof" not in text:
         return False
@@ -3524,7 +3932,7 @@ def _is_window_open_request(text: str) -> bool:
 def _is_window_match_request(text: str) -> bool:
     if not re.search(r"\bwindows?\b", text):
         return False
-    if "rear" not in text or "front" not in text:
+    if "rear" not in text and "front" not in text:
         return False
     return any(
         phrase in text
@@ -3537,6 +3945,20 @@ def _is_window_match_request(text: str) -> bool:
             "even",
         )
     )
+
+
+def _extract_window_match_reference(
+    text: str,
+) -> Literal["FRONT", "PASSENGER_REAR"]:
+    if "passenger rear" in text or "rear passenger" in text or "right rear" in text:
+        return "PASSENGER_REAR"
+    return "FRONT"
+
+
+def _window_match_completion_message(match: WindowMatchFlow) -> str:
+    if match.reference_window == "PASSENGER_REAR":
+        return "Done, all windows match the passenger rear window."
+    return "Done, the rear windows match the front windows."
 
 
 def _is_ambient_light_request(text: str) -> bool:
@@ -3557,12 +3979,17 @@ def _is_ambient_light_match_car_color_request(text: str) -> bool:
         for phrase in (
             "car color",
             "car's color",
+            "color of my car",
             "car colour",
             "car's colour",
+            "colour of my car",
             "exterior color",
             "exterior colour",
             "outside color",
             "outside colour",
+            "exterior",
+            "paint color",
+            "paint colour",
         )
     )
 
@@ -3740,6 +4167,7 @@ def _is_air_circulation_request(text: str) -> bool:
             "set",
             "switch",
             "turn",
+            "what about",
             "fresh air",
             "recirculation",
             "preferred",
@@ -3763,6 +4191,7 @@ def _is_air_conditioning_request(text: str) -> bool:
             "deactivate",
             "set",
             "cool",
+            "what about",
         )
     )
 
@@ -4027,6 +4456,157 @@ def _is_complex_navigation_request(text: str) -> bool:
     return any(marker in text for marker in complex_markers)
 
 
+POI_CATEGORY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("restaurants", ("restaurant", "restaurants", "meal", "dinner", "lunch")),
+    ("fast_food", ("fast food", "burger", "drive-through", "drive through")),
+    ("charging_stations", ("charging station", "charging stations", "charger")),
+    ("public_toilets", ("toilet", "toilets", "restroom", "bathroom")),
+    ("supermarkets", ("supermarket", "grocery", "groceries")),
+    ("parking", ("parking", "car park")),
+    ("bakery", ("bakery", "bakeries")),
+    ("airports", ("airport", "airports")),
+)
+
+
+def _is_poi_request(text: str) -> bool:
+    if _poi_category_from_text(text) is None:
+        return False
+    if (
+        "charging station" in text
+        and ("along the route" in text or "stop" in text)
+        and re.search(r"\b(route|navigation|navigate)\b", text)
+    ):
+        return False
+    return bool(
+        any(
+            marker in text
+            for marker in (
+                "find",
+                "search",
+                "look for",
+                "nearby",
+                "near me",
+                "around here",
+                "options",
+                "available",
+                "good",
+                "where",
+                "directions",
+                "destination",
+                "go to",
+                "grab",
+            )
+        )
+    )
+
+
+def _extract_poi_category(text: str) -> str:
+    return _poi_category_from_text(text) or "restaurants"
+
+
+def _poi_category_from_text(text: str) -> str | None:
+    for category, terms in POI_CATEGORY_TERMS:
+        if any(term in text for term in terms):
+            return category
+    return None
+
+
+def _extract_poi_location(text: str) -> str | None:
+    name = (
+        r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’.-]*"
+        r"(?:\s+(?:[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’.-]*|"
+        r"la|de|del|di|du|da|das|dos|and|of)){0,5}"
+    )
+    patterns = (
+        rf"\b(?i:restaurants?|fast food|bakery|supermarket|parking|toilets?)"
+        rf"\b[^.?!]{{0,80}}\b(?i:in|near|around|at)\s+({name})",
+        rf"\b(?i:find|search|look for|show|get)\b[^.?!]{{0,100}}"
+        rf"\b(?i:in|near|around|at)\s+({name})",
+        rf"\b(?i:go|going|drive|head|navigate)\b[^.?!]{{0,100}}"
+        rf"\b(?i:to)\s+({name})",
+        rf"\b(?i:destination)\b[^.?!]{{0,80}}\b(?i:to)\s+({name})",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if not matches:
+            continue
+        location = _clean_poi_location(matches[-1])
+        if location:
+            return location
+    return None
+
+
+def _clean_poi_location(value: str) -> str | None:
+    location = _clean_location_query(value)
+    if location is None:
+        return None
+    lowered = location.lower()
+    blocked = {
+        "restaurant",
+        "restaurants",
+        "parking",
+        "toilet",
+        "toilets",
+        "supermarket",
+        "bakery",
+        "airport",
+    }
+    if lowered in blocked:
+        return None
+    return location
+
+
+def _is_nearby_poi_request(text: str) -> bool:
+    return any(
+        phrase in text
+        for phrase in (
+            "nearby",
+            "near me",
+            "around here",
+            "close by",
+            "current location",
+            "where i am",
+            "here",
+        )
+    )
+
+
+def _do_not_set_navigation(text: str) -> bool:
+    if (
+        _is_replace_destination_request(text)
+        or "changed my mind" in text
+        or "destination" in text
+    ):
+        return False
+    if any(
+        phrase in text
+        for phrase in (
+            "don't set",
+            "do not set",
+            "without setting",
+            "don't navigate",
+            "do not navigate",
+        )
+    ):
+        return True
+    if any(
+        phrase in text
+        for phrase in (
+            "options",
+            "available",
+            "curious",
+            "potentially",
+            "maybe",
+            "how long",
+            "nearby",
+        )
+    ):
+        return True
+    return not bool(
+        re.search(r"\b(navigate|directions|route|drive|go|take me|set)\b", text)
+    )
+
+
 def _is_replace_destination_request(text: str) -> bool:
     return bool(
         (
@@ -4058,6 +4638,7 @@ def _extract_navigation_destination(text: str) -> str | None:
 
 def _clean_location_query(value: str) -> str | None:
     value = value.split(",", 1)[0]
+    value = re.split(r"[.?!]\s+", value, maxsplit=1)[0]
     value = re.split(
         r"\b(?:instead|because|with|without|if|when|that|which|where|for|from|via|then|first|next|now|rather)\b",
         value,
@@ -4125,6 +4706,191 @@ def _extract_route_choice_index(text: str) -> int | None:
     if re.search(r"\b(another|different|alternative|other)\s+(?:route|option)\b", text):
         return 1
     return None
+
+
+def _select_route_index_by_via(
+    routes: list[dict[str, Any]], text: str
+) -> int | None:
+    text_norm = _normalized_text(text)
+    requested_roads = _extract_road_tokens(text)
+    best_index: int | None = None
+    best_overlap = 0
+
+    for index, route in enumerate(routes):
+        via = route.get("name_via")
+        if not isinstance(via, str) or not via.strip():
+            continue
+
+        via_norm = _normalized_text(via)
+        if via_norm and via_norm in text_norm:
+            return index
+
+        route_roads = _extract_road_tokens(via)
+        if not requested_roads or not route_roads:
+            continue
+        overlap = len(requested_roads & route_roads)
+        if overlap == len(requested_roads):
+            return index
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_index = index
+
+    return best_index if best_overlap else None
+
+
+def _extract_road_tokens(text: str) -> set[str]:
+    return {
+        re.sub(r"[^A-Z0-9]", "", token)
+        for token in re.findall(r"\b[A-Z]{1,4}\s*[- ]?\s*\d+[A-Z]?\b", text.upper())
+    }
+
+
+def _select_poi_from_text(
+    pois: list[dict[str, Any]], text: str
+) -> dict[str, Any] | None:
+    option_index = _extract_poi_option_index(text)
+    if option_index is not None:
+        if 0 <= option_index < len(pois):
+            return pois[option_index]
+        return None
+
+    normalized_text = _normalized_text(text)
+    for poi in pois:
+        name = poi.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        normalized_name = _normalized_text(name)
+        if normalized_name and normalized_name in normalized_text:
+            return poi
+        name_tokens = {
+            token
+            for token in normalized_name.split()
+            if len(token) > 2 and token not in {"the", "and", "restaurant"}
+        }
+        if name_tokens and name_tokens.issubset(set(normalized_text.split())):
+            return poi
+    return None
+
+
+def _extract_poi_option_index(text: str) -> int | None:
+    route_index = _extract_route_choice_index(text)
+    if route_index is not None:
+        return route_index
+
+    ordinal_to_index = {
+        "first": 0,
+        "1st": 0,
+        "one": 0,
+        "second": 1,
+        "2nd": 1,
+        "two": 1,
+        "third": 2,
+        "3rd": 2,
+        "three": 2,
+        "fourth": 3,
+        "4th": 3,
+        "four": 3,
+    }
+    if match := re.search(r"\b(?:option|place|restaurant)\s+([1-4])\b", text):
+        return int(match.group(1)) - 1
+    if match := re.search(r"\b([1-4])(?:st|nd|rd|th)?\s+(?:option|place|restaurant)\b", text):
+        return int(match.group(1)) - 1
+    for word, index in ordinal_to_index.items():
+        if re.search(rf"\b{word}\s+(?:option|place|restaurant|one)\b", text):
+            return index
+        if re.search(rf"\b(?:option|place|restaurant|one)\s+{word}\b", text):
+            return index
+    return None
+
+
+def _format_poi_choice_prompt(category: str, pois: list[dict[str, Any]]) -> str:
+    label = _friendly_poi_category(category)
+    options = []
+    for index, poi in enumerate(pois[:4], start=1):
+        name = poi.get("name")
+        if not isinstance(name, str) or not name.strip():
+            name = f"Option {index}"
+        details = []
+        opening_hours = _format_opening_hours(
+            poi.get("opening_hours") or poi.get("opening_times") or poi.get("hours")
+        )
+        if opening_hours:
+            details.append(f"open {opening_hours}")
+        rating = poi.get("rating")
+        if isinstance(rating, (int, float)):
+            details.append(f"rating {rating:g}")
+        suffix = f" ({', '.join(details)})" if details else ""
+        options.append(f"{index}. {name}{suffix}")
+
+    singular = label[:-1] if label.endswith("s") else label
+    return f"I found these {label}: {'; '.join(options)}. Which {singular} would you like?"
+
+
+def _friendly_poi_category(category: str) -> str:
+    return {
+        "restaurants": "restaurants",
+        "fast_food": "fast-food places",
+        "charging_stations": "charging stations",
+        "public_toilets": "public toilets",
+        "supermarkets": "supermarkets",
+        "parking": "parking options",
+        "bakery": "bakeries",
+        "airports": "airports",
+    }.get(category, category.replace("_", " "))
+
+
+def _format_opening_hours(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        for key in ("today", "current_day", "opening_hours", "hours"):
+            if key in value:
+                return _format_opening_hours(value[key])
+        for nested in value.values():
+            formatted = _format_opening_hours(nested)
+            if formatted:
+                return formatted
+        return None
+    if isinstance(value, list):
+        formatted_values = [
+            formatted
+            for item in value[:2]
+            if (formatted := _format_opening_hours(item))
+        ]
+        return ", ".join(formatted_values) if formatted_values else None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    def convert_ampm(match: re.Match[str]) -> str:
+        hour = int(match.group(1))
+        minute = match.group(2) or "00"
+        suffix = match.group(3).lower()
+        if suffix == "pm" and hour != 12:
+            hour += 12
+        if suffix == "am" and hour == 12:
+            hour = 0
+        return f"{hour:02d}:{minute}h"
+
+    text = re.sub(
+        r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
+        convert_ampm,
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\b(\d{1,2}:\d{2})(?!\s*h)\b", r"\1h", text)
+    text = re.sub(r"\s*[-–—]\s*", " - ", text)
+    return text
+
+
+def _normalized_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    without_marks = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
+    return " ".join(
+        re.sub(r"[^a-zA-Z0-9]+", " ", without_marks).casefold().split()
+    )
 
 
 def _navigation_route_start_id(
