@@ -81,9 +81,7 @@ class FakeCerebrasSDKClient:
         self.create_endpoint = FakeCerebrasCreateEndpoint(outcomes)
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(
-                with_raw_response=SimpleNamespace(
-                    create=self.create_endpoint.create
-                )
+                with_raw_response=SimpleNamespace(create=self.create_endpoint.create)
             )
         )
 
@@ -400,9 +398,7 @@ class A2AResponseContractTest(unittest.TestCase):
             "provider_error_headers": {"x-should-retry": "false"},
         }
         original_uniform = cerebras_client_module.random.uniform
-        cerebras_client_module.random.uniform = lambda left, right: (
-            left + right
-        ) / 2.0
+        cerebras_client_module.random.uniform = lambda left, right: (left + right) / 2.0
         try:
             first_signal = _extract_cerebras_rate_limit_signal(
                 details,
@@ -723,16 +719,12 @@ class A2AResponseContractTest(unittest.TestCase):
             self.assertEqual(payload["tokens_consumed"]["input_tokens"], 1000)
             self.assertEqual(payload["tokens_consumed"]["output_tokens"], 100)
             self.assertEqual(
-                payload["tokens_consumed_since_previous_rate_limit"][
-                    "input_tokens"
-                ],
+                payload["tokens_consumed_since_previous_rate_limit"]["input_tokens"],
                 1000,
             )
             self.assertEqual(payload["estimated_request_tokens_attempted"], 1234)
             self.assertEqual(
-                payload[
-                    "estimated_request_tokens_attempted_since_previous_rate_limit"
-                ],
+                payload["estimated_request_tokens_attempted_since_previous_rate_limit"],
                 1234,
             )
             self.assertEqual(
@@ -944,7 +936,9 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(response.observation, "Error: boom")
         self.assertEqual(errors, ["failing_tool: TypeError: boom"])
 
-    def test_async_generic_tool_exception_is_recorded_in_tool_execution_errors(self) -> None:
+    def test_async_generic_tool_exception_is_recorded_in_tool_execution_errors(
+        self,
+    ) -> None:
         class FailingTool:
             @staticmethod
             def invoke(**kwargs):
@@ -997,12 +991,14 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(errors, ["explicit failure"])
 
     def test_cerebras_respond_action_returns_text_part(self) -> None:
-        parts, history_message = CerebrasCARBenchAgentExecutor._build_a2a_response_parts(
-            {
-                "action": "respond",
-                "content": "Done.",
-                "tool_calls": [],
-            }
+        parts, history_message = (
+            CerebrasCARBenchAgentExecutor._build_a2a_response_parts(
+                {
+                    "action": "respond",
+                    "content": "Done.",
+                    "tool_calls": [],
+                }
+            )
         )
 
         self.assertEqual(len(parts), 1)
@@ -1011,17 +1007,19 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(history_message, {"role": "assistant", "content": "Done."})
 
     def test_cerebras_tool_action_returns_tool_calls_data_part(self) -> None:
-        parts, history_message = CerebrasCARBenchAgentExecutor._build_a2a_response_parts(
-            {
-                "action": "tool_calls",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "tool_name": "open_close_sunshade",
-                        "arguments": {"percentage": 50},
-                    }
-                ],
-            }
+        parts, history_message = (
+            CerebrasCARBenchAgentExecutor._build_a2a_response_parts(
+                {
+                    "action": "tool_calls",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "tool_name": "open_close_sunshade",
+                            "arguments": {"percentage": 50},
+                        }
+                    ],
+                }
+            )
         )
 
         self.assertEqual(len(parts), 1)
@@ -1097,7 +1095,9 @@ class A2AResponseContractTest(unittest.TestCase):
             0,
         )
 
-    def test_cerebras_planner_clears_private_plan_when_policy_controls_turn(self) -> None:
+    def test_cerebras_planner_clears_private_plan_when_policy_controls_turn(
+        self,
+    ) -> None:
         class NoModelPlanner(CerebrasPlannerExecutor):
             def __init__(self) -> None:
                 super().__init__(
@@ -1146,7 +1146,9 @@ class A2AResponseContractTest(unittest.TestCase):
             executor._active_private_plans_by_context,
         )
 
-    def test_cerebras_model_tool_call_is_validated_against_available_tools(self) -> None:
+    def test_cerebras_model_tool_call_is_validated_against_available_tools(
+        self,
+    ) -> None:
         class InvalidToolCallExecutor(CerebrasCARBenchAgentExecutor):
             def __init__(self) -> None:
                 super().__init__(model="gpt-oss-120b")
@@ -1158,9 +1160,7 @@ class A2AResponseContractTest(unittest.TestCase):
                     next_action={
                         "action": "tool_calls",
                         "content": "",
-                        "tool_calls": [
-                            {"tool_name": "missing_tool", "arguments": {}}
-                        ],
+                        "tool_calls": [{"tool_name": "missing_tool", "arguments": {}}],
                     },
                     elapsed_ms=25.0,
                     internal_calls=1,
@@ -1186,7 +1186,7 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(response.parts[0].WhichOneof("content"), "text")
         self.assertEqual(
             response.parts[0].text,
-            "I can't do that because the missing_tool capability is not available right now.",
+            "I don't currently have that capability, so I can't complete this request.",
         )
 
     def test_cerebras_turn_metrics_are_public_metadata_shape(self) -> None:

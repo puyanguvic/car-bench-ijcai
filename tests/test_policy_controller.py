@@ -3,13 +3,22 @@ import json
 from carbench_agent_core import PolicyAwareController
 
 
-def fake_tool(name: str) -> dict:
+def fake_tool(
+    name: str,
+    *,
+    properties: dict | None = None,
+    required: list[str] | None = None,
+) -> dict:
     return {
         "type": "function",
         "function": {
             "name": name,
             "description": "",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {
+                "type": "object",
+                "properties": properties or {},
+                "required": required or [],
+            },
         },
     }
 
@@ -41,6 +50,7 @@ def navigation_tools() -> list[dict]:
         fake_tool("get_routes_from_start_to_destination"),
         fake_tool("set_new_navigation"),
         fake_tool("navigation_replace_final_destination"),
+        fake_tool("navigation_delete_destination"),
         fake_tool("navigation_delete_waypoint"),
         fake_tool("navigation_replace_one_waypoint"),
     ]
@@ -414,6 +424,246 @@ def test_navigation_controller_replaces_final_destination_from_route_predecessor
     ]
 
 
+def test_navigation_controller_uses_second_route_after_user_choice() -> None:
+    controller = PolicyAwareController()
+    messages = system_messages(location_id="loc_dortmund")
+    tools = navigation_tools()
+
+    controller.decide(
+        context_id="ctx-second-route",
+        messages=messages,
+        tools=tools,
+        latest_user_text=(
+            "I've changed my mind about going to Düsseldorf. Can you change "
+            "my navigation to Dresden instead?"
+        ),
+    )
+    controller.decide(
+        context_id="ctx-second-route",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_location_id_by_location_name", {"id": "loc_dresden"})
+        ],
+    )
+    action = controller.decide(
+        context_id="ctx-second-route",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {
+                    "routes": [
+                        {"route_id": "rll_dor_dre_first", "alias": ["first"]},
+                        {"route_id": "rll_dor_dre_second", "alias": ["second"]},
+                    ]
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "Second route" in action.content
+
+    action = controller.decide(
+        context_id="ctx-second-route",
+        messages=messages,
+        tools=tools,
+        latest_user_text="Can you show me another route option?",
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "navigation_replace_final_destination",
+            "arguments": {
+                "new_destination_id": "loc_dresden",
+                "route_id_leading_to_new_destination": "rll_dor_dre_second",
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-second-route",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "navigation_replace_final_destination",
+                {
+                    "destination_replaced": True,
+                    "new_waypoints": ["loc_dortmund", "loc_dresden"],
+                    "new_routes": ["rll_dor_dre_second"],
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert "second route" in action.content.lower()
+
+
+def test_navigation_controller_deletes_final_destination_from_recent_lookup() -> None:
+    controller = PolicyAwareController()
+    messages = system_messages(location_id="loc_duisburg") + [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_lookup_barcelona",
+                    "type": "function",
+                    "function": {
+                        "name": "get_location_id_by_location_name",
+                        "arguments": '{"location": "Barcelona"}',
+                    },
+                }
+            ],
+        }
+    ]
+    tools = navigation_tools()
+
+    action = controller.decide(
+        context_id="ctx-delete-final-known",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_location_id_by_location_name", {"id": "loc_barcelona"})
+        ],
+    )
+    assert action is None
+
+    action = controller.decide(
+        context_id="ctx-delete-final-known",
+        messages=system_messages(location_id="loc_duisburg"),
+        tools=tools,
+        latest_user_text=(
+            "I don't need to go to Barcelona anymore. Please delete Barcelona "
+            "from my current navigation route so Hamburg is the final destination."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "navigation_delete_destination",
+            "arguments": {"destination_id_to_delete": "loc_barcelona"},
+        }
+    ]
+
+
+def test_navigation_controller_deletes_final_destination_from_current_state() -> None:
+    controller = PolicyAwareController()
+    messages = system_messages(location_id="loc_wiesbaden")
+    tools = navigation_tools()
+
+    action = controller.decide(
+        context_id="ctx-delete-final-state",
+        messages=messages,
+        tools=tools,
+        latest_user_text="Cancel my final destination, Monaco, and end my trip at Stuttgart.",
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_current_navigation_state",
+            "arguments": {"detailed_information": True},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-delete-final-state",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_current_navigation_state",
+                {
+                    "navigation_active": True,
+                    "waypoints_id": [
+                        "loc_wiesbaden",
+                        "loc_stuttgart",
+                        "loc_monaco",
+                    ],
+                    "routes_to_final_destination_id": [
+                        "rll_wie_stu",
+                        "rll_stu_mon",
+                    ],
+                    "details": {
+                        "waypoints": [
+                            {"id": "loc_wiesbaden", "name": "Wiesbaden"},
+                            {"id": "loc_stuttgart", "name": "Stuttgart"},
+                            {"id": "loc_monaco", "name": "Monaco"},
+                        ]
+                    },
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "navigation_delete_destination",
+            "arguments": {"destination_id_to_delete": "loc_monaco"},
+        }
+    ]
+
+
+def test_controller_blocks_tool_call_when_current_schema_rejects_arguments() -> None:
+    controller = PolicyAwareController()
+    messages = system_messages(location_id="loc_wiesbaden")
+    tools = [
+        fake_tool("get_current_navigation_state"),
+        fake_tool(
+            "navigation_delete_destination",
+            properties={"different_argument": {"type": "string"}},
+        ),
+    ]
+
+    action = controller.decide(
+        context_id="ctx-delete-final-guard",
+        messages=messages,
+        tools=tools,
+        latest_user_text="Cancel my final destination, Monaco, and end my trip at Stuttgart.",
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_current_navigation_state",
+            "arguments": {"detailed_information": True},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-delete-final-guard",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_current_navigation_state",
+                {
+                    "navigation_active": True,
+                    "waypoints_id": [
+                        "loc_wiesbaden",
+                        "loc_stuttgart",
+                        "loc_monaco",
+                    ],
+                    "details": {
+                        "waypoints": [
+                            {"id": "loc_wiesbaden", "name": "Wiesbaden"},
+                            {"id": "loc_stuttgart", "name": "Stuttgart"},
+                            {"id": "loc_monaco", "name": "Monaco"},
+                        ]
+                    },
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert (
+        action.content == "I can't complete this request with the available controls."
+    )
+    assert "destination_id_to_delete" not in action.content
+
+
 def test_navigation_followup_reuses_observed_waypoints_after_external_route_edit() -> (
     None
 ):
@@ -720,7 +970,7 @@ def test_navigation_controller_does_not_infer_when_named_waypoint_is_absent() ->
     assert "Paris is not currently an intermediate waypoint" in action.content
 
 
-def test_navigation_controller_defaults_to_fastest_when_deleting_waypoint() -> None:
+def test_navigation_controller_asks_route_choice_when_deleting_waypoint() -> None:
     controller = PolicyAwareController()
     messages = system_messages(location_id="loc_mannheim")
     tools = navigation_tools()
@@ -774,12 +1024,23 @@ def test_navigation_controller_defaults_to_fastest_when_deleting_waypoint() -> N
         ],
     )
     assert action is not None
+    assert action.action == "respond"
+    assert "fastest" in action.content.lower()
+    assert "shortest" in action.content.lower()
+
+    action = controller.decide(
+        context_id="ctx-delete-fastest-default",
+        messages=messages,
+        tools=tools,
+        latest_user_text="Use the shortest route.",
+    )
+    assert action is not None
     assert action.tool_calls == [
         {
             "tool_name": "navigation_delete_waypoint",
             "arguments": {
                 "waypoint_id_to_delete": "loc_stuttgart",
-                "route_id_without_waypoint": "rll_man_par_fast",
+                "route_id_without_waypoint": "rll_man_par_short",
             },
         }
     ]
@@ -900,6 +1161,100 @@ def test_navigation_controller_replaces_single_intermediate_waypoint() -> None:
                 "new_waypoint_id": "loc_frankfurt",
                 "route_id_leading_to_new_waypoint": "rll_bel_fra",
                 "route_id_leading_away_from_new_waypoint": "rll_fra_rom",
+            },
+        }
+    ]
+
+
+def test_navigation_controller_defaults_to_fastest_when_replacing_waypoint() -> None:
+    controller = PolicyAwareController()
+    messages = system_messages(location_id="loc_wiesbaden")
+    tools = navigation_tools()
+
+    controller.decide(
+        context_id="ctx-replace-waypoint-fastest-default",
+        messages=messages,
+        tools=tools,
+        latest_user_text="Replace Frankfurt with Milan in my current navigation.",
+    )
+    controller.decide(
+        context_id="ctx-replace-waypoint-fastest-default",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_current_navigation_state",
+                {
+                    "navigation_active": True,
+                    "waypoints_id": [
+                        "loc_wiesbaden",
+                        "loc_frankfurt",
+                        "loc_munich",
+                    ],
+                    "routes_to_final_destination_id": [
+                        "rll_wie_fra",
+                        "rll_fra_mun",
+                    ],
+                    "details": {
+                        "waypoints": [
+                            {"id": "loc_wiesbaden", "name": "Wiesbaden"},
+                            {"id": "loc_frankfurt", "name": "Frankfurt"},
+                            {"id": "loc_munich", "name": "Munich"},
+                        ]
+                    },
+                },
+            )
+        ],
+    )
+    controller.decide(
+        context_id="ctx-replace-waypoint-fastest-default",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_location_id_by_location_name", {"id": "loc_milan"})
+        ],
+    )
+    controller.decide(
+        context_id="ctx-replace-waypoint-fastest-default",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {
+                    "routes": [
+                        {"route_id": "rll_wie_mil_fast", "alias": ["fastest"]},
+                        {"route_id": "rll_wie_mil_short", "alias": ["shortest"]},
+                    ]
+                },
+            )
+        ],
+    )
+    action = controller.decide(
+        context_id="ctx-replace-waypoint-fastest-default",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {
+                    "routes": [
+                        {"route_id": "rll_mil_mun_fast", "alias": ["fastest"]},
+                        {"route_id": "rll_mil_mun_short", "alias": ["shortest"]},
+                    ]
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "navigation_replace_one_waypoint",
+            "arguments": {
+                "waypoint_id_to_replace": "loc_frankfurt",
+                "new_waypoint_id": "loc_milan",
+                "route_id_leading_to_new_waypoint": "rll_wie_mil_fast",
+                "route_id_leading_away_from_new_waypoint": "rll_mil_mun_fast",
             },
         }
     ]
