@@ -78,7 +78,6 @@ def window_positions(
 
 
 def test_ambient_light_controller_matches_car_color() -> None:
-    controller = PolicyAwareController()
     tools = [
         fake_tool("get_car_color"),
         fake_tool(
@@ -91,28 +90,37 @@ def test_ambient_light_controller_matches_car_color() -> None:
         ),
     ]
 
-    action = controller.decide(
-        context_id="ctx-ambient-car-color",
-        messages=messages(),
-        tools=tools,
-        latest_user_text="Set the ambient lights to match my car's exterior color.",
-    )
-    assert action is not None
-    assert action.tool_calls == [{"tool_name": "get_car_color", "arguments": {}}]
+    for idx, request in enumerate(
+        (
+            "Set the ambient lights to match my car's exterior color.",
+            "Set the ambient lights to match the color of my car.",
+        )
+    ):
+        controller = PolicyAwareController()
+        context_id = f"ctx-ambient-car-color-{idx}"
 
-    action = controller.decide(
-        context_id="ctx-ambient-car-color",
-        messages=messages(),
-        tools=tools,
-        latest_tool_results=[tool_result("get_car_color", {"car_color": "PURPLE"})],
-    )
-    assert action is not None
-    assert action.tool_calls == [
-        {
-            "tool_name": "set_ambient_lights",
-            "arguments": {"on": True, "lightcolor": "PURPLE"},
-        }
-    ]
+        action = controller.decide(
+            context_id=context_id,
+            messages=messages(),
+            tools=tools,
+            latest_user_text=request,
+        )
+        assert action is not None
+        assert action.tool_calls == [{"tool_name": "get_car_color", "arguments": {}}]
+
+        action = controller.decide(
+            context_id=context_id,
+            messages=messages(),
+            tools=tools,
+            latest_tool_results=[tool_result("get_car_color", {"car_color": "PURPLE"})],
+        )
+        assert action is not None
+        assert action.tool_calls == [
+            {
+                "tool_name": "set_ambient_lights",
+                "arguments": {"on": True, "lightcolor": "PURPLE"},
+            }
+        ]
 
 
 def test_window_match_controller_sets_rear_windows_to_front_position() -> None:
@@ -753,3 +761,133 @@ def test_high_beam_controller_refuses_when_fog_status_is_missing() -> None:
     assert action is not None
     assert action.action == "respond"
     assert "fog light status" in action.content.lower()
+
+
+def test_completed_window_flow_does_not_block_followup_ac_and_air_circulation() -> None:
+    controller = PolicyAwareController()
+    tools = climate_tools() + [
+        fake_tool("set_air_circulation", {"mode": {"type": "string"}}, ["mode"])
+    ]
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_user_text="Open all windows to 50%.",
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_climate_settings", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[tool_result("get_climate_settings", climate_result())],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "open_close_window", "arguments": {"window": "ALL", "percentage": 50}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result("open_close_window", {"window": "ALL", "percentage": 50})
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_user_text=(
+            "What about the AC and air circulation? Turn on the AC and set "
+            "air circulation to fresh air."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_climate_settings", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[tool_result("get_climate_settings", climate_result())],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "get_vehicle_window_positions", "arguments": {}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_vehicle_window_positions",
+                window_positions(
+                    driver=50,
+                    passenger=50,
+                    driver_rear=50,
+                    passenger_rear=50,
+                ),
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "open_close_window", "arguments": {"window": "ALL", "percentage": 0}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result("open_close_window", {"window": "ALL", "percentage": 0})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "set_fan_speed", "arguments": {"level": 1}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[tool_result("set_fan_speed", {"level": 1})],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "set_air_conditioning", "arguments": {"on": True}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[tool_result("set_air_conditioning", {"on": True})],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "set_air_circulation", "arguments": {"mode": "FRESH_AIR"}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-window-then-ac-circulation",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result("set_air_circulation", {"mode": "FRESH_AIR"})
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "air conditioning is on" in action.content.lower()
+    assert "fresh air mode" in action.content.lower()

@@ -80,22 +80,31 @@ class ToolIndex:
             return render_missing_required_information()
 
         allowed = self.arg_names(name)
-        if allowed:
+        tool = self.get(name) or {}
+        params = tool.get("function", {}).get("parameters", {})
+        properties = params.get("properties")
+        if isinstance(properties, dict):
             unknown = sorted(set(arguments) - allowed)
-            if unknown:
+            if unknown and (
+                allowed
+                or "" in unknown
+                or params.get("additionalProperties") is False
+            ):
                 return render_unavailable_control()
 
-            for arg_name, value in arguments.items():
-                schema = self.arg_schema(name, arg_name)
-                enum_values = schema.get("enum")
-                if isinstance(enum_values, list) and value not in enum_values:
-                    return render_unavailable_control()
+        for arg_name, value in arguments.items():
+            schema = self.arg_schema(name, arg_name)
+            if not schema:
+                continue
+            enum_values = schema.get("enum")
+            if isinstance(enum_values, list) and value not in enum_values:
+                return render_unavailable_control()
 
-                schema_type = schema.get("type")
-                if isinstance(schema_type, str) and not _matches_schema_type(
-                    value, schema_type
-                ):
-                    return render_unavailable_control()
+            schema_type = schema.get("type")
+            if isinstance(schema_type, str) and not _matches_schema_type(
+                value, schema_type
+            ):
+                return render_unavailable_control()
 
         return None
 
