@@ -132,6 +132,212 @@ def test_navigation_controller_sets_fastest_single_destination_route() -> None:
     ]
 
 
+def test_navigation_controller_sets_two_leg_navigation_route() -> None:
+    controller = PolicyAwareController()
+    messages = system_messages(location_id="loc_berlin")
+    tools = navigation_tools()
+
+    action = controller.decide(
+        context_id="ctx-multi-stop-nav",
+        messages=messages,
+        tools=tools,
+        latest_user_text=(
+            "Navigate from Berlin to Bremen, then to Amsterdam. "
+            "I need the fastest route."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_location_id_by_location_name",
+            "arguments": {"location": "Bremen"},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-multi-stop-nav",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_location_id_by_location_name", {"id": "loc_bremen"})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_location_id_by_location_name",
+            "arguments": {"location": "Amsterdam"},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-multi-stop-nav",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_location_id_by_location_name", {"id": "loc_amsterdam"})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_routes_from_start_to_destination",
+            "arguments": {
+                "start_id": "loc_berlin",
+                "destination_id": "loc_bremen",
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-multi-stop-nav",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {
+                    "routes": [
+                        {"route_id": "route_ber_bre_fast", "alias": ["fastest"]},
+                        {"route_id": "route_ber_bre_short", "alias": ["shortest"]},
+                    ]
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_routes_from_start_to_destination",
+            "arguments": {
+                "start_id": "loc_bremen",
+                "destination_id": "loc_amsterdam",
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-multi-stop-nav",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {
+                    "routes": [
+                        {"route_id": "route_bre_ams_fast", "alias": ["fastest"]},
+                        {"route_id": "route_bre_ams_short", "alias": ["shortest"]},
+                    ]
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "set_new_navigation",
+            "arguments": {
+                "route_ids": ["route_ber_bre_fast", "route_bre_ams_fast"]
+            },
+        }
+    ]
+
+
+def test_planned_navigation_followup_poi_search_does_not_start_old_route() -> None:
+    controller = PolicyAwareController()
+    messages = system_messages(location_id="loc_sofia")
+    tools = navigation_tools() + [fake_tool("search_poi_at_location")]
+    context_id = "ctx-planned-route-poi-followup"
+
+    action = controller.decide(
+        context_id=context_id,
+        messages=messages,
+        tools=tools,
+        latest_user_text=(
+            "I want to plan a trip. First, I need to go to Belgrade. "
+            "Can you find me fastest route there, but without toll roads if it's "
+            "not more than 10 minutes longer than the fastest route with tolls?"
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_location_id_by_location_name",
+            "arguments": {"location": "Belgrade"},
+        }
+    ]
+
+    action = controller.decide(
+        context_id=context_id,
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_location_id_by_location_name", {"id": "loc_belgrade"})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_routes_from_start_to_destination",
+            "arguments": {
+                "start_id": "loc_sofia",
+                "destination_id": "loc_belgrade",
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id=context_id,
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {
+                    "routes": [
+                        {
+                            "route_id": "route_sof_bel_fast_toll",
+                            "alias": ["fastest"],
+                            "duration_hours": 4,
+                            "duration_minutes": 0,
+                            "includes_toll": True,
+                        },
+                        {
+                            "route_id": "route_sof_bel_no_toll",
+                            "alias": ["shortest"],
+                            "duration_hours": 4,
+                            "duration_minutes": 5,
+                            "includes_toll": False,
+                        },
+                    ]
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+
+    action = controller.decide(
+        context_id=context_id,
+        messages=messages,
+        tools=tools,
+        latest_user_text=(
+            "Okay, after Belgrade, I need to go to a supermarket that's still open. "
+            "What's the fastest route for that?"
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "search_poi_at_location",
+            "arguments": {
+                "category_poi": "supermarkets",
+                "location_id": "loc_belgrade",
+            },
+        }
+    ]
+
+
 def test_navigation_controller_asks_when_route_choice_is_ambiguous() -> None:
     controller = PolicyAwareController()
     messages = system_messages()

@@ -317,6 +317,8 @@ class NavigationFlow:
     destination_id: str | None = None
     route_start_id: str | None = None
     route_preference: Literal["fastest", "shortest"] | None = None
+    toll_avoidance_tolerance_minutes: int | None = None
+    planning_only: bool = False
     routes_checked: bool = False
     routes: list[dict[str, Any]] = field(default_factory=list)
     route_choice_requested: bool = False
@@ -353,22 +355,50 @@ class NavigationFlow:
 
 
 @dataclass
+class MultiStopNavigationFlow:
+    active: bool = False
+    first_destination_name: str | None = None
+    first_destination_id: str | None = None
+    final_destination_name: str | None = None
+    final_destination_id: str | None = None
+    route_preference: Literal["fastest", "shortest"] | None = None
+    first_routes_checked: bool = False
+    first_routes: list[dict[str, Any]] = field(default_factory=list)
+    final_routes_checked: bool = False
+    final_routes: list[dict[str, Any]] = field(default_factory=list)
+    completion_message: str | None = None
+    completed: bool = False
+    failure_message: str | None = None
+
+
+@dataclass
 class POIFlow:
     active: bool = False
     category: str = "restaurants"
     location_name: str | None = None
     location_id: str | None = None
+    search_along_route: bool = False
+    route_id: str | None = None
+    route_start_id: str | None = None
+    route_end_id: str | None = None
+    route_prefix_ids: list[str] = field(default_factory=list)
+    route_lookup: Literal["to_poi", "from_poi"] | None = None
+    current_navigation_checked: bool = False
+    required_open_at_minutes: int | None = None
     pois_checked: bool = False
     pois: list[dict[str, Any]] = field(default_factory=list)
     selected_poi_id: str | None = None
     selected_poi_name: str | None = None
     routes_checked: bool = False
     routes: list[dict[str, Any]] = field(default_factory=list)
+    routes_from_poi_checked: bool = False
+    routes_from_poi: list[dict[str, Any]] = field(default_factory=list)
     route_choice_requested: bool = False
     route_preference: Literal["fastest", "shortest"] | None = None
     selected_route_index: int | None = None
     replace_final_destination: bool = False
     do_not_set_navigation: bool = False
+    defer_navigation_setup: bool = False
     completion_message: str | None = None
     completed: bool = False
     failure_message: str | None = None
@@ -589,6 +619,16 @@ class ControllerState:
     pending_location_lookup_name: str | None = None
     recent_location_lookup_name: str | None = None
     recent_location_lookup_id: str | None = None
+    recent_navigation_route_ids: list[str] = field(default_factory=list)
+    recent_navigation_waypoints: list[str] = field(default_factory=list)
+    planned_navigation_route_ids: list[str] = field(default_factory=list)
+    planned_navigation_waypoints: list[str] = field(default_factory=list)
+    planned_navigation_arrival_minutes: int | None = None
+    pending_poi_after_navigation: POIFlow | None = None
+    pending_set_navigation_route_ids: list[str] = field(default_factory=list)
+    multi_stop_navigation: MultiStopNavigationFlow = field(
+        default_factory=MultiStopNavigationFlow
+    )
     recent_driver_temperature: float | None = None
     recent_passenger_temperature: float | None = None
     recent_charging_pois: list[dict[str, Any]] = field(default_factory=list)
@@ -644,6 +684,8 @@ class PolicyAwareController:
                 reason="direct_status_response",
             )
             state.pending_direct_response = None
+        elif state.pending_set_navigation_route_ids:
+            action = self._next_pending_navigation_setup_action(state, tool_index)
         elif state.sunroof.active:
             action = self._next_sunroof_action(state, tool_index)
         elif state.sunshade.active:
@@ -688,6 +730,8 @@ class PolicyAwareController:
             action = self._next_route_energy_action(state, tool_index)
         elif state.poi.active:
             action = self._next_poi_action(state, tool_index)
+        elif state.multi_stop_navigation.active:
+            action = self._next_multi_stop_navigation_action(state, tool_index)
         elif state.navigation.active:
             action = self._next_navigation_action(state, tool_index)
         elif state.email.active:
@@ -782,6 +826,8 @@ class PolicyAwareController:
             state.defrost.active and not state.defrost.completed,
             state.poi.active and not state.poi.completed,
             state.route_energy.active and not state.route_energy.completed,
+            state.multi_stop_navigation.active
+            and not state.multi_stop_navigation.completed,
             state.navigation.active and not state.navigation.completed,
             state.email.active and not state.email.completed,
         ]
@@ -814,6 +860,8 @@ class PolicyAwareController:
             state.poi = POIFlow()
         if state.route_energy.completed:
             state.route_energy = RouteEnergyFlow()
+        if state.multi_stop_navigation.completed:
+            state.multi_stop_navigation = MultiStopNavigationFlow()
 
     def _reset_completed_flows_for_new_intent(self, state: ControllerState) -> None:
         if state.sunroof.completed:
@@ -854,6 +902,8 @@ class PolicyAwareController:
             state.poi = POIFlow()
         if state.route_energy.completed:
             state.route_energy = RouteEnergyFlow()
+        if state.multi_stop_navigation.completed:
+            state.multi_stop_navigation = MultiStopNavigationFlow()
 
     def _sync_runtime_context(
         self, state: ControllerState, messages: list[dict[str, Any]]
@@ -919,6 +969,14 @@ class PolicyAwareController:
 
         if _contains_new_action_intent(lowered):
             self._reset_completed_flows_for_new_intent(state)
+
+        if _is_planned_navigation_setup_request(lowered) and (
+            state.planned_navigation_route_ids
+        ):
+            state.pending_set_navigation_route_ids = list(
+                state.planned_navigation_route_ids
+            )
+            return
 
         if _is_window_ac_status_query(lowered):
             response = _format_recent_window_ac_status(state)
@@ -1499,22 +1557,87 @@ class PolicyAwareController:
                     _record_route_energy_selected_poi(state.route_energy, selected)
             if state.route_energy.active:
                 state.poi = POIFlow()
+        elif (multi_stop_destinations := _extract_two_leg_navigation_destinations(text)) is not None:
+            first_destination, final_destination = multi_stop_destinations
+            state.multi_stop_navigation = MultiStopNavigationFlow(
+                active=True,
+                first_destination_name=first_destination,
+                final_destination_name=final_destination,
+                route_preference=_extract_route_preference(lowered),
+            )
+        elif _is_trip_planning_navigation_request(lowered) and (
+            destination := _extract_navigation_destination(text)
+        ) is not None:
+            pending_poi = None
+            if _is_poi_request(lowered):
+                search_along_route = _is_along_route_poi_request(lowered)
+                pending_poi = POIFlow(
+                    active=True,
+                    category=_extract_poi_category(lowered),
+                    search_along_route=search_along_route,
+                    route_preference=_extract_route_preference(lowered),
+                    do_not_set_navigation=(
+                        search_along_route
+                        and not _is_add_waypoint_poi_request(lowered)
+                    ),
+                    defer_navigation_setup=True,
+                )
+            state.pending_poi_after_navigation = pending_poi
+            state.navigation = NavigationFlow(
+                active=True,
+                mode="set_new",
+                destination_name=destination,
+                route_preference=_extract_route_preference(lowered),
+                toll_avoidance_tolerance_minutes=_extract_toll_avoidance_tolerance_minutes(
+                    lowered
+                ),
+                planning_only=_is_navigation_planning_only_request(lowered),
+            )
         elif _is_poi_request(lowered):
             location_name = _extract_poi_location(text)
+            search_along_route = _is_along_route_poi_request(lowered)
+            route_id = _route_id_for_poi_followup(state)
+            route_prefix_ids = list(state.planned_navigation_route_ids)
+            route_start_id = (
+                state.planned_navigation_waypoints[-1]
+                if state.planned_navigation_waypoints
+                else None
+            )
+            required_open_at_minutes = (
+                state.planned_navigation_arrival_minutes
+                if route_prefix_ids and "open" in lowered
+                else None
+            )
+            if search_along_route:
+                location_name = None
+            location_id = None
+            if route_prefix_ids and route_start_id and not search_along_route:
+                location_id = route_start_id
+            elif location_name is None and _is_nearby_poi_request(lowered):
+                location_id = state.runtime.location_id
             state.poi = POIFlow(
                 active=True,
                 category=_extract_poi_category(lowered),
                 location_name=location_name,
-                location_id=(
-                    state.runtime.location_id
-                    if location_name is None and _is_nearby_poi_request(lowered)
-                    else None
-                ),
+                location_id=location_id,
+                search_along_route=search_along_route,
+                route_id=route_id if search_along_route else None,
+                route_start_id=route_start_id if route_prefix_ids else None,
+                route_prefix_ids=route_prefix_ids,
+                required_open_at_minutes=required_open_at_minutes,
                 route_preference=_extract_route_preference(lowered),
                 replace_final_destination=_is_replace_destination_request(lowered)
                 or "changed my mind" in lowered
                 or "instead" in lowered,
-                do_not_set_navigation=_do_not_set_navigation(lowered),
+                do_not_set_navigation=(
+                    True
+                    if search_along_route
+                    and not _is_add_waypoint_poi_request(lowered)
+                    else False
+                    if route_prefix_ids
+                    else _do_not_set_navigation(lowered)
+                ),
+                defer_navigation_setup=bool(route_prefix_ids),
             )
         elif _is_navigation_replace_waypoint_request(lowered):
             state.navigation = NavigationFlow(
@@ -1527,6 +1650,15 @@ class PolicyAwareController:
             )
         elif _is_navigation_delete_waypoint_request(lowered):
             state.navigation = _new_navigation_delete_waypoint_flow(text)
+        elif (
+            meeting_location := _calendar_meeting_navigation_location(lowered, state)
+        ) is not None:
+            state.navigation = NavigationFlow(
+                active=True,
+                mode="set_new",
+                destination_name=meeting_location,
+                route_preference="fastest",
+            )
         elif _is_vague_navigation_destination_request(lowered):
             state.navigation = NavigationFlow(
                 active=True,
@@ -1536,6 +1668,10 @@ class PolicyAwareController:
                     else "set_new"
                 ),
                 route_preference=_extract_route_preference(lowered),
+                toll_avoidance_tolerance_minutes=_extract_toll_avoidance_tolerance_minutes(
+                    lowered
+                ),
+                planning_only=_is_navigation_planning_only_request(lowered),
                 needs_current_navigation=_is_replace_destination_request(lowered),
             )
         elif _is_simple_navigation_request(text):
@@ -1558,11 +1694,15 @@ class PolicyAwareController:
                     mode="replace_final_destination"
                     if replace_destination
                     else "set_new",
-                    destination_name=destination,
-                    route_preference=_extract_route_preference(lowered),
-                    needs_current_navigation=(
-                        _navigation_replace_needs_current_state(lowered)
-                        or bool(current_waypoints)
+                destination_name=destination,
+                route_preference=_extract_route_preference(lowered),
+                toll_avoidance_tolerance_minutes=_extract_toll_avoidance_tolerance_minutes(
+                    lowered
+                ),
+                planning_only=_is_navigation_planning_only_request(lowered),
+                needs_current_navigation=(
+                    _navigation_replace_needs_current_state(lowered)
+                    or bool(current_waypoints)
                         or (
                             replace_followup
                             and ("route" in lowered or "instead" in lowered)
@@ -2177,6 +2317,30 @@ class PolicyAwareController:
                                     if isinstance(waypoint, dict)
                                 ]
                         _resolve_navigation_waypoint_from_state(state.navigation)
+                if state.poi.active and state.poi.search_along_route:
+                    state.poi.current_navigation_checked = True
+                    if isinstance(result, dict):
+                        waypoints = result.get("waypoints_id")
+                        waypoint_ids = (
+                            [
+                                str(waypoint)
+                                for waypoint in waypoints
+                                if isinstance(waypoint, str)
+                            ]
+                            if isinstance(waypoints, list)
+                            else []
+                        )
+                        routes = result.get("routes_to_final_destination_id")
+                        if isinstance(routes, list):
+                            route_ids = [
+                                str(route) for route in routes if isinstance(route, str)
+                            ]
+                            if route_ids:
+                                state.poi.route_id = route_ids[-1]
+                                if len(waypoint_ids) >= len(route_ids) + 1:
+                                    index = len(route_ids) - 1
+                                    state.poi.route_start_id = waypoint_ids[index]
+                                    state.poi.route_end_id = waypoint_ids[index + 1]
             elif name == "get_entries_from_calendar":
                 if isinstance(result, dict):
                     meetings = result.get("meetings")
@@ -2209,6 +2373,12 @@ class PolicyAwareController:
                         ):
                             state.email.weather_location_id = result["id"]
                         state.pending_location_lookup_name = None
+                    if state.multi_stop_navigation.active:
+                        multi_stop = state.multi_stop_navigation
+                        if multi_stop.first_destination_id is None:
+                            multi_stop.first_destination_id = result["id"]
+                        elif multi_stop.final_destination_id is None:
+                            multi_stop.final_destination_id = result["id"]
                     if state.poi.active and state.poi.location_id is None:
                         state.poi.location_id = result["id"]
                     if (
@@ -2227,6 +2397,16 @@ class PolicyAwareController:
                     and state.pending_location_lookup_name
                 ):
                     state.pending_location_lookup_name = None
+                elif state.multi_stop_navigation.active:
+                    multi_stop = state.multi_stop_navigation
+                    destination = (
+                        multi_stop.first_destination_name
+                        if multi_stop.first_destination_id is None
+                        else multi_stop.final_destination_name
+                    ) or "that destination"
+                    multi_stop.failure_message = (
+                        f"I couldn't find a location ID for {destination}."
+                    )
                 elif state.poi.active and state.poi.location_id is None:
                     location = state.poi.location_name or "that location"
                     state.poi.failure_message = f"I couldn't find {location}."
@@ -2275,10 +2455,32 @@ class PolicyAwareController:
                             for poi in result["pois_found"]
                             if isinstance(poi, dict)
                         ]
+                        if state.poi.required_open_at_minutes is not None:
+                            state.poi.pois = [
+                                poi
+                                for poi in state.poi.pois
+                                if _poi_open_at_minutes(
+                                    poi, state.poi.required_open_at_minutes
+                                )
+                            ]
                     if not state.poi.pois:
                         state.poi.failure_message = (
                             "I couldn't find matching places there."
                         )
+            elif name == "search_poi_along_the_route" and state.poi.active:
+                state.poi.pois_checked = True
+                if isinstance(result, dict) and isinstance(
+                    result.get("pois_found_along_route"), list
+                ):
+                    state.poi.pois = [
+                        poi
+                        for poi in result["pois_found_along_route"]
+                        if isinstance(poi, dict)
+                    ]
+                if not state.poi.pois:
+                    state.poi.failure_message = (
+                        "I couldn't find matching places along the route."
+                    )
             elif name == "get_contact_id_by_contact_name":
                 if state.email.active:
                     _record_email_contact_matches(state.email, result)
@@ -2301,9 +2503,21 @@ class PolicyAwareController:
                         else:
                             route_energy.routes_checked = True
                             route_energy.routes = routes
+                    elif state.multi_stop_navigation.active:
+                        multi_stop = state.multi_stop_navigation
+                        if not multi_stop.first_routes_checked:
+                            multi_stop.first_routes_checked = True
+                            multi_stop.first_routes = routes
+                        else:
+                            multi_stop.final_routes_checked = True
+                            multi_stop.final_routes = routes
                     elif state.poi.active and state.poi.selected_poi_id is not None:
-                        state.poi.routes_checked = True
-                        state.poi.routes = routes
+                        if state.poi.route_lookup == "from_poi":
+                            state.poi.routes_from_poi_checked = True
+                            state.poi.routes_from_poi = routes
+                        else:
+                            state.poi.routes_checked = True
+                            state.poi.routes = routes
                     else:
                         _record_navigation_routes(state.navigation, routes)
                     if not routes:
@@ -2315,13 +2529,21 @@ class PolicyAwareController:
                             state.route_energy.failure_message = (
                                 "I couldn't find a route to that destination."
                             )
+                        elif state.multi_stop_navigation.active:
+                            state.multi_stop_navigation.failure_message = (
+                                "I couldn't find a route to that destination."
+                            )
                         else:
                             state.navigation.failure_message = (
                                 "I couldn't find a route to that destination."
                             )
                 elif state.poi.active and state.poi.selected_poi_id is not None:
-                    state.poi.routes_checked = True
-                    state.poi.routes = []
+                    if state.poi.route_lookup == "from_poi":
+                        state.poi.routes_from_poi_checked = True
+                        state.poi.routes_from_poi = []
+                    else:
+                        state.poi.routes_checked = True
+                        state.poi.routes = []
                     state.poi.failure_message = (
                         "I can't determine the route options from the available route result."
                     )
@@ -2337,6 +2559,17 @@ class PolicyAwareController:
                         route_energy.routes_checked = True
                         route_energy.routes = []
                     route_energy.failure_message = (
+                        "I can't determine the route options from the available route result."
+                    )
+                elif state.multi_stop_navigation.active:
+                    multi_stop = state.multi_stop_navigation
+                    if not multi_stop.first_routes_checked:
+                        multi_stop.first_routes_checked = True
+                        multi_stop.first_routes = []
+                    else:
+                        multi_stop.final_routes_checked = True
+                        multi_stop.final_routes = []
+                    multi_stop.failure_message = (
                         "I can't determine the route options from the available route result."
                     )
                 elif state.navigation.active:
@@ -2419,6 +2652,7 @@ class PolicyAwareController:
                     state.route_energy.call_completed = True
             elif name in {
                 "set_new_navigation",
+                "navigation_add_one_waypoint",
                 "navigation_replace_final_destination",
                 "navigation_delete_destination",
                 "navigation_delete_waypoint",
@@ -2426,22 +2660,47 @@ class PolicyAwareController:
             } and isinstance(result, dict):
                 if state.route_energy.active and name == "set_new_navigation":
                     state.route_energy.completed = True
+                elif (
+                    state.multi_stop_navigation.active and name == "set_new_navigation"
+                ):
+                    state.multi_stop_navigation.completed = True
+                elif state.poi.active and name in {
+                    "set_new_navigation",
+                    "navigation_add_one_waypoint",
+                    "navigation_replace_final_destination",
+                }:
+                    state.poi.completed = True
                 else:
                     state.navigation.completed = True
                 if state.poi.active and state.poi.replace_final_destination:
                     state.poi.completed = True
+                elif state.poi.active and state.poi.completed:
+                    state.planned_navigation_route_ids = []
+                    state.planned_navigation_waypoints = []
                 waypoints = result.get("new_waypoints")
+                if not isinstance(waypoints, list):
+                    waypoints = result.get("new_waypoints_id")
+                if not isinstance(waypoints, list):
+                    waypoints = result.get("waypoints")
                 if isinstance(waypoints, list):
                     state.navigation.waypoints_id = [
                         str(waypoint)
                         for waypoint in waypoints
                         if isinstance(waypoint, str)
                     ]
+                    state.recent_navigation_waypoints = list(
+                        state.navigation.waypoints_id
+                    )
                 routes = result.get("new_routes")
+                if not isinstance(routes, list):
+                    routes = result.get("new_routes_id")
                 if isinstance(routes, list):
                     state.navigation.routes_to_final_destination_id = [
                         str(route) for route in routes if isinstance(route, str)
                     ]
+                    state.recent_navigation_route_ids = list(
+                        state.navigation.routes_to_final_destination_id
+                    )
             elif name == "send_email" and state.email.active:
                 if isinstance(payload, dict) and payload.get("status") == "SUCCESS":
                     state.email.completed = True
@@ -5026,6 +5285,185 @@ class PolicyAwareController:
         charging.route_id = route_id
         return None
 
+    def _next_pending_navigation_setup_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        route_ids = [
+            route_id
+            for route_id in state.pending_set_navigation_route_ids
+            if isinstance(route_id, str) and route_id
+        ]
+        state.pending_set_navigation_route_ids = []
+        if not route_ids:
+            return NextAction.respond(
+                "I don't have a planned route ready to start.",
+                reason="planned_navigation_missing_routes",
+            )
+        if not tool_index.has("set_new_navigation"):
+            return NextAction.respond(
+                "I can't start navigation because that control is unavailable right now.",
+                reason="planned_navigation_missing_set_tool",
+            )
+        state.navigation = NavigationFlow(
+            active=True,
+            routes_to_final_destination_id=list(route_ids),
+            completion_message="Done, navigation is started.",
+        )
+        state.recent_navigation_route_ids = list(route_ids)
+        return NextAction.tool_call(
+            "set_new_navigation",
+            {"route_ids": route_ids},
+            reason="planned_navigation_set",
+        )
+
+    def _next_multi_stop_navigation_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        multi_stop = state.multi_stop_navigation
+
+        if multi_stop.completed:
+            message = multi_stop.completion_message or "Done, navigation is started."
+            state.multi_stop_navigation = MultiStopNavigationFlow()
+            return NextAction.respond(message, reason="multi_stop_navigation_done")
+
+        if multi_stop.failure_message:
+            message = multi_stop.failure_message
+            state.multi_stop_navigation = MultiStopNavigationFlow()
+            return NextAction.respond(message, reason="multi_stop_navigation_failed")
+
+        if multi_stop.first_destination_id is None:
+            if not tool_index.has("get_location_id_by_location_name"):
+                return NextAction.respond(
+                    "I can't look up that destination because location search is unavailable right now.",
+                    reason="multi_stop_navigation_missing_location_tool",
+                )
+            if not multi_stop.first_destination_name:
+                return NextAction.respond(
+                    "Which first stop should I use?",
+                    reason="multi_stop_navigation_missing_first_destination",
+                )
+            return NextAction.tool_call(
+                "get_location_id_by_location_name",
+                {"location": multi_stop.first_destination_name},
+                reason="multi_stop_navigation_lookup_first_destination",
+            )
+
+        if multi_stop.final_destination_id is None:
+            if not tool_index.has("get_location_id_by_location_name"):
+                return NextAction.respond(
+                    "I can't look up that destination because location search is unavailable right now.",
+                    reason="multi_stop_navigation_missing_location_tool",
+                )
+            if not multi_stop.final_destination_name:
+                return NextAction.respond(
+                    "Which final destination should I use?",
+                    reason="multi_stop_navigation_missing_final_destination",
+                )
+            return NextAction.tool_call(
+                "get_location_id_by_location_name",
+                {"location": multi_stop.final_destination_name},
+                reason="multi_stop_navigation_lookup_final_destination",
+            )
+
+        start_id = state.runtime.location_id
+        if start_id is None:
+            return NextAction.respond(
+                "I need the current location before I can find a route.",
+                reason="multi_stop_navigation_missing_start",
+            )
+
+        if not tool_index.has("get_routes_from_start_to_destination"):
+            return NextAction.respond(
+                "I can't find a route because route search is unavailable right now.",
+                reason="multi_stop_navigation_missing_route_tool",
+            )
+
+        if not multi_stop.first_routes_checked:
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": start_id,
+                    "destination_id": multi_stop.first_destination_id,
+                },
+                reason="multi_stop_navigation_first_route_lookup",
+            )
+
+        if not multi_stop.final_routes_checked:
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": multi_stop.first_destination_id,
+                    "destination_id": multi_stop.final_destination_id,
+                },
+                reason="multi_stop_navigation_final_route_lookup",
+            )
+
+        first_route = _select_requested_route(
+            multi_stop.first_routes,
+            multi_stop.route_preference,
+            None,
+        )
+        if first_route is None and len(multi_stop.first_routes) == 1:
+            first_route = multi_stop.first_routes[0]
+        elif first_route is None and _route_choice_is_unambiguous(
+            multi_stop.first_routes
+        ):
+            first_route = _select_route(multi_stop.first_routes, "fastest")
+
+        final_route = _select_requested_route(
+            multi_stop.final_routes,
+            multi_stop.route_preference,
+            None,
+        )
+        if final_route is None and len(multi_stop.final_routes) == 1:
+            final_route = multi_stop.final_routes[0]
+        elif final_route is None and _route_choice_is_unambiguous(
+            multi_stop.final_routes
+        ):
+            final_route = _select_route(multi_stop.final_routes, "fastest")
+
+        if first_route is None or final_route is None:
+            routes = (
+                multi_stop.first_routes if first_route is None else multi_stop.final_routes
+            )
+            return NextAction.respond(
+                _format_route_choice_prompt(routes),
+                reason="multi_stop_navigation_route_disambiguation",
+            )
+
+        first_route_id = first_route.get("route_id")
+        final_route_id = final_route.get("route_id")
+        if not isinstance(first_route_id, str) or not isinstance(final_route_id, str):
+            return NextAction.respond(
+                "I can't safely start navigation because a route segment ID is missing.",
+                reason="multi_stop_navigation_missing_route_id",
+            )
+
+        if not tool_index.has("set_new_navigation"):
+            return NextAction.respond(
+                "I can't start navigation because that control is unavailable right now.",
+                reason="multi_stop_navigation_missing_set_tool",
+            )
+
+        route_ids = [first_route_id, final_route_id]
+        state.recent_navigation_route_ids = list(route_ids)
+        state.recent_navigation_waypoints = [
+            start_id,
+            multi_stop.first_destination_id,
+            multi_stop.final_destination_id,
+        ]
+        multi_stop.completion_message = _navigation_multi_route_completion_message(
+            "navigation is started",
+            [first_route, final_route],
+            multi_stop.route_preference,
+            multi_stop.first_routes + multi_stop.final_routes,
+        )
+        return NextAction.tool_call(
+            "set_new_navigation",
+            {"route_ids": route_ids},
+            reason="multi_stop_navigation_set",
+        )
+
     def _next_poi_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -5040,6 +5478,160 @@ class PolicyAwareController:
             message = poi.failure_message
             state.poi = POIFlow()
             return NextAction.respond(message, reason="poi_failed")
+
+        if poi.search_along_route:
+            if poi.route_id is None and not poi.current_navigation_checked:
+                if not tool_index.has("get_current_navigation_state"):
+                    return NextAction.respond(
+                        "I need the current route before I can search along it.",
+                        reason="poi_along_route_missing_current_nav_tool",
+                    )
+                return NextAction.tool_call(
+                    "get_current_navigation_state",
+                    {"detailed_information": False},
+                    reason="poi_along_route_current_navigation",
+                )
+            if poi.route_id is None:
+                return NextAction.respond(
+                    "I need a route before I can search along it.",
+                    reason="poi_along_route_missing_route",
+                )
+            if not poi.pois_checked:
+                if not tool_index.has("search_poi_along_the_route"):
+                    return NextAction.respond(
+                        "I can't search for places along the route because that route search is unavailable right now.",
+                        reason="poi_missing_along_route_search_tool",
+                    )
+                return NextAction.tool_call(
+                    "search_poi_along_the_route",
+                    {"category_poi": poi.category, "route_id": poi.route_id},
+                    reason="poi_along_route_search",
+                )
+
+            if poi.selected_poi_id is None:
+                if len(poi.pois) == 1:
+                    selected = poi.pois[0]
+                    poi.selected_poi_id = selected.get("id")
+                    poi.selected_poi_name = selected.get("name")
+                else:
+                    return NextAction.respond(
+                        _format_poi_choice_prompt(poi.category, poi.pois),
+                        reason="poi_along_route_choice",
+                    )
+
+            if not isinstance(poi.selected_poi_id, str) or not poi.selected_poi_id:
+                return NextAction.respond(
+                    "Which place would you like me to add as a stop?",
+                    reason="poi_along_route_missing_choice",
+                )
+
+            if poi.do_not_set_navigation:
+                stop_name = poi.selected_poi_name or "that place"
+                poi.completed = True
+                poi.completion_message = f"{stop_name} is available along the route."
+                return self._next_poi_action(state, tool_index)
+
+            if poi.route_start_id is None or poi.route_end_id is None:
+                return NextAction.respond(
+                    "I need the current route waypoints before I can add a stop along it.",
+                    reason="poi_along_route_missing_adjacent_waypoints",
+                )
+
+            if not tool_index.has("get_routes_from_start_to_destination"):
+                return NextAction.respond(
+                    "I can't find the route segments for that stop because route search is unavailable right now.",
+                    reason="poi_along_route_missing_route_tool",
+                )
+
+            if not poi.routes_checked:
+                poi.route_lookup = "to_poi"
+                return NextAction.tool_call(
+                    "get_routes_from_start_to_destination",
+                    {
+                        "start_id": poi.route_start_id,
+                        "destination_id": poi.selected_poi_id,
+                    },
+                    reason="poi_along_route_to_stop_lookup",
+                )
+
+            if not poi.routes_from_poi_checked:
+                poi.route_lookup = "from_poi"
+                return NextAction.tool_call(
+                    "get_routes_from_start_to_destination",
+                    {
+                        "start_id": poi.selected_poi_id,
+                        "destination_id": poi.route_end_id,
+                    },
+                    reason="poi_along_route_from_stop_lookup",
+                )
+
+            route_preference_defaulted = poi.route_preference is None
+            route_preference = poi.route_preference or "fastest"
+            route_to_poi = _select_requested_route(
+                poi.routes,
+                route_preference,
+                poi.selected_route_index,
+            )
+            if route_to_poi is None and route_preference_defaulted and poi.routes:
+                route_to_poi = _select_route(poi.routes, "fastest") or poi.routes[0]
+            elif route_to_poi is None and len(poi.routes) == 1:
+                route_to_poi = poi.routes[0]
+
+            route_from_poi = _select_requested_route(
+                poi.routes_from_poi,
+                route_preference,
+                poi.selected_route_index,
+            )
+            if (
+                route_from_poi is None
+                and route_preference_defaulted
+                and poi.routes_from_poi
+            ):
+                route_from_poi = (
+                    _select_route(poi.routes_from_poi, "fastest")
+                    or poi.routes_from_poi[0]
+                )
+            elif route_from_poi is None and len(poi.routes_from_poi) == 1:
+                route_from_poi = poi.routes_from_poi[0]
+
+            if route_to_poi is None or route_from_poi is None:
+                poi.route_choice_requested = True
+                routes = poi.routes or poi.routes_from_poi
+                return NextAction.respond(
+                    _format_route_choice_prompt(routes),
+                    reason="poi_along_route_route_disambiguation",
+                )
+
+            route_to_poi_id = route_to_poi.get("route_id")
+            route_from_poi_id = route_from_poi.get("route_id")
+            if not isinstance(route_to_poi_id, str) or not isinstance(
+                route_from_poi_id, str
+            ):
+                return NextAction.respond(
+                    "I can't safely add that stop because a route segment ID is missing.",
+                    reason="poi_along_route_missing_route_id",
+                )
+
+            if not tool_index.has("navigation_add_one_waypoint"):
+                return NextAction.respond(
+                    "I can't add a waypoint because that navigation edit control is unavailable right now.",
+                    reason="poi_along_route_missing_add_waypoint_tool",
+                )
+
+            poi.completed = True
+            stop_name = poi.selected_poi_name or "that place"
+            poi.completion_message = f"Done, I added {stop_name} as a stop along the route."
+            return NextAction.tool_call(
+                "navigation_add_one_waypoint",
+                {
+                    "waypoint_id_to_add": poi.selected_poi_id,
+                    "waypoint_id_before_new_waypoint": poi.route_start_id,
+                    "waypoint_id_after_new_waypoint": poi.route_end_id,
+                    "route_id_leading_to_new_waypoint": route_to_poi_id,
+                    "route_id_leading_away_from_new_waypoint": route_from_poi_id,
+                },
+                reason="poi_along_route_add_waypoint",
+            )
 
         if poi.location_id is None:
             if poi.location_name is None:
@@ -5071,7 +5663,7 @@ class PolicyAwareController:
             )
 
         if poi.selected_poi_id is None:
-            if len(poi.pois) == 1:
+            if len(poi.pois) == 1 or poi.route_prefix_ids:
                 selected = poi.pois[0]
                 poi.selected_poi_id = selected.get("id")
                 poi.selected_poi_name = selected.get("name")
@@ -5101,7 +5693,7 @@ class PolicyAwareController:
             return NextAction.tool_call(
                 "get_routes_from_start_to_destination",
                 {
-                    "start_id": state.runtime.location_id,
+                    "start_id": poi.route_start_id or state.runtime.location_id,
                     "destination_id": poi.selected_poi_id,
                 },
                 reason="poi_route_lookup",
@@ -5159,6 +5751,36 @@ class PolicyAwareController:
                     "route_id_leading_to_new_destination": route_id,
                 },
                 reason="poi_replace_navigation_destination",
+            )
+
+        if poi.route_prefix_ids:
+            full_route_ids = poi.route_prefix_ids + [route_id]
+            state.planned_navigation_route_ids = list(full_route_ids)
+            if poi.route_start_id and poi.selected_poi_id:
+                state.planned_navigation_waypoints = [
+                    *state.planned_navigation_waypoints,
+                    poi.selected_poi_id,
+                ]
+            state.recent_navigation_route_ids = list(full_route_ids)
+            if poi.defer_navigation_setup:
+                poi.completed = True
+                poi.completion_message = (
+                    "Done, I planned the multi-stop route. "
+                    "Do you want me to start navigation?"
+                )
+                return self._next_poi_action(state, tool_index)
+
+            if not tool_index.has("set_new_navigation"):
+                return NextAction.respond(
+                    "I can't start navigation because that control is unavailable right now.",
+                    reason="poi_missing_set_navigation_tool",
+                )
+            poi.completed = True
+            poi.completion_message = "Done, navigation is started with the added stop."
+            return NextAction.tool_call(
+                "set_new_navigation",
+                {"route_ids": full_route_ids},
+                reason="poi_set_prefixed_navigation",
             )
 
         poi.completed = True
@@ -5262,14 +5884,12 @@ class PolicyAwareController:
                 reason="navigation_route_lookup",
             )
 
-        selected_route = _select_requested_route(
-            navigation.routes,
-            navigation.route_preference,
-            navigation.selected_route_index,
-        )
+        selected_route = _select_navigation_requested_route(navigation)
         if selected_route is None:
             if len(navigation.routes) == 1:
                 selected_route = navigation.routes[0]
+            elif _route_choice_is_unambiguous(navigation.routes):
+                selected_route = _select_route(navigation.routes, "fastest")
             else:
                 navigation.route_choice_requested = True
                 return NextAction.respond(
@@ -5283,6 +5903,61 @@ class PolicyAwareController:
                 "I can't safely set that route because the route ID is missing.",
                 reason="navigation_missing_route_id",
             )
+
+        if navigation.planning_only:
+            start_id = navigation.route_start_id
+            destination_id = navigation.destination_id
+            if isinstance(start_id, str) and isinstance(destination_id, str):
+                state.planned_navigation_route_ids = [route_id]
+                state.planned_navigation_waypoints = [start_id, destination_id]
+                state.recent_navigation_route_ids = [route_id]
+                state.recent_navigation_waypoints = [start_id, destination_id]
+                duration = _route_duration_minutes(selected_route)
+                if duration is not None and state.runtime.hour is not None:
+                    current_minutes = state.runtime.hour * 60 + (
+                        state.runtime.minute or 0
+                    )
+                    state.planned_navigation_arrival_minutes = (
+                        current_minutes + duration
+                    ) % (24 * 60)
+                pending_poi = state.pending_poi_after_navigation
+                if pending_poi is not None:
+                    state.pending_poi_after_navigation = None
+                    pending_poi.route_prefix_ids = [route_id]
+                    pending_poi.route_start_id = (
+                        start_id if pending_poi.search_along_route else destination_id
+                    )
+                    pending_poi.route_end_id = (
+                        destination_id if pending_poi.search_along_route else None
+                    )
+                    pending_poi.route_id = (
+                        route_id if pending_poi.search_along_route else None
+                    )
+                    pending_poi.location_id = (
+                        None if pending_poi.search_along_route else destination_id
+                    )
+                    if (
+                        state.planned_navigation_arrival_minutes is not None
+                        and "open" in state.last_user_text.lower()
+                    ):
+                        pending_poi.required_open_at_minutes = (
+                            state.planned_navigation_arrival_minutes
+                        )
+                    state.poi = pending_poi
+                    state.navigation = NavigationFlow()
+                    return self._next_poi_action(state, tool_index)
+            navigation.completed = True
+            navigation.completion_message = _navigation_completion_message(
+                "the first route is planned",
+                selected_route,
+                (
+                    None
+                    if navigation.toll_avoidance_tolerance_minutes is not None
+                    else navigation.route_preference
+                ),
+                navigation.routes,
+            )
+            return self._next_navigation_action(state, tool_index)
 
         if navigation.mode == "replace_final_destination":
             if not tool_index.has("navigation_replace_final_destination"):
@@ -5313,9 +5988,21 @@ class PolicyAwareController:
         navigation.completion_message = _navigation_completion_message(
             "navigation is started",
             selected_route,
-            navigation.route_preference,
+            (
+                None
+                if navigation.toll_avoidance_tolerance_minutes is not None
+                else navigation.route_preference
+            ),
             navigation.routes,
         )
+        if navigation.route_start_id and navigation.destination_id:
+            navigation.routes_to_final_destination_id = [route_id]
+            navigation.waypoints_id = [
+                navigation.route_start_id,
+                navigation.destination_id,
+            ]
+            state.recent_navigation_route_ids = [route_id]
+            state.recent_navigation_waypoints = list(navigation.waypoints_id)
         return NextAction.tool_call(
             "set_new_navigation",
             {"route_ids": [route_id]},
@@ -8763,9 +9450,30 @@ def _is_poi_request(text: str) -> bool:
                 "destination",
                 "go to",
                 "grab",
+                "stop",
+                "still open",
             )
         )
     )
+
+
+def _is_along_route_poi_request(text: str) -> bool:
+    return bool(
+        re.search(r"\b(along|on)\b[^.?!]{0,40}\b(route|way|trip)\b", text)
+        or "along the whole route" in text
+        or "along this route" in text
+        or "on the way" in text
+    )
+
+
+def _route_id_for_poi_followup(state: ControllerState) -> str | None:
+    if state.planned_navigation_route_ids:
+        return state.planned_navigation_route_ids[-1]
+    if state.recent_navigation_route_ids:
+        return state.recent_navigation_route_ids[-1]
+    if state.navigation.routes_to_final_destination_id:
+        return state.navigation.routes_to_final_destination_id[-1]
+    return None
 
 
 def _extract_poi_category(text: str) -> str:
@@ -8873,6 +9581,164 @@ def _do_not_set_navigation(text: str) -> bool:
     return not bool(
         re.search(r"\b(navigate|directions|route|drive|go|take me|set)\b", text)
     )
+
+
+def _is_navigation_planning_only_request(text: str) -> bool:
+    if any(
+        phrase in text
+        for phrase in (
+            "don't want to start navigation",
+            "do not want to start navigation",
+            "don't start navigation",
+            "do not start navigation",
+            "not start navigation yet",
+            "don't want to set up navigation",
+            "do not want to set up navigation",
+        )
+    ):
+        return True
+    return bool(
+        ("plan a trip" in text or "plan the trip" in text or "plan my trip" in text)
+        and not re.search(r"\b(set up|start)\s+navigation\b", text)
+    )
+
+
+def _is_trip_planning_navigation_request(text: str) -> bool:
+    if not any(
+        phrase in text
+        for phrase in (
+            "plan a trip",
+            "plan the trip",
+            "plan my trip",
+            "multi-stop trip",
+            "multistop trip",
+            "whole trip",
+        )
+    ):
+        return False
+    return bool(re.search(r"\b(navigate|navigation|route|go|drive|travel)\b", text))
+
+
+def _extract_two_leg_navigation_destinations(text: str) -> tuple[str, str] | None:
+    location = _location_name_pattern()
+    patterns = (
+        rf"\b(?i:navigate|navigation|directions?|drive|go|travel|route)\b"
+        rf"[^.?!]{{0,120}}?\bto\s+{location}\s*,?\s*(?:and\s+)?then\s+to\s+{location}",
+        rf"\b(?i:from)\s+{location}\s+\b(?i:to)\s+{location}"
+        rf"\s*,?\s*(?:and\s+)?then\s+to\s+{location}",
+        rf"\b(?i:to)\s+{location}\s*,?\s*(?:and\s+)?then\s+to\s+{location}",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if not matches:
+            continue
+        match = matches[-1]
+        values = match if isinstance(match, tuple) else (match,)
+        if len(values) < 2:
+            continue
+        first_raw, final_raw = values[-2], values[-1]
+        first_destination = _clean_location_query(first_raw)
+        final_destination = _clean_location_query(final_raw)
+        if (
+            first_destination
+            and final_destination
+            and not _is_generic_navigation_destination(first_destination)
+            and not _is_generic_navigation_destination(final_destination)
+        ):
+            return first_destination, final_destination
+    return None
+
+
+def _is_generic_navigation_destination(name: str) -> bool:
+    normalized = _normalized_text(name)
+    generic_terms = {
+        "airport",
+        "bakery",
+        "charging station",
+        "charger",
+        "fast food",
+        "grocery",
+        "parking",
+        "public toilet",
+        "restaurant",
+        "restroom",
+        "supermarket",
+    }
+    return normalized in generic_terms
+
+
+def _is_planned_navigation_setup_request(text: str) -> bool:
+    if any(
+        phrase in text
+        for phrase in (
+            "don't",
+            "do not",
+            "not yet",
+            "without starting",
+            "without setting",
+        )
+    ):
+        return False
+    if re.search(
+        r"\b(after|find|search|look for|open|restaurant|supermarket|charging station|"
+        r"what(?:'s| is)|which|where)\b",
+        text,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(set up|start|begin|launch)\b[^.?!]{0,80}\b(navigation|trip|route)\b",
+            text,
+        )
+        or re.search(
+            r"\b(yes|confirm|confirmed)\b[^.?!]{0,80}"
+            r"\b(set up|start|begin|launch)\b",
+            text,
+        )
+    )
+
+
+def _is_add_waypoint_poi_request(text: str) -> bool:
+    return bool(
+        re.search(r"\b(add|insert|include|put)\b[^.?!]{0,80}\b(stop|waypoint)\b", text)
+        or re.search(r"\b(stop at|add a stop|add it as a stop)\b", text)
+    )
+
+
+def _extract_toll_avoidance_tolerance_minutes(text: str) -> int | None:
+    if "toll" not in text:
+        return None
+    if not any(phrase in text for phrase in ("without toll", "avoid toll", "no toll")):
+        return None
+    match = re.search(
+        r"(?:not more than|within|no more than)\s+(\d{1,3})\s*minutes?",
+        text,
+    )
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def _calendar_meeting_navigation_location(
+    text: str, state: ControllerState
+) -> str | None:
+    if not re.search(
+        r"\b(direction|directions|navigate|navigation|route|drive|get to|go to)\b",
+        text,
+    ):
+        return None
+    for meeting in state.recent_calendar_meetings:
+        topic = meeting.get("topic")
+        location = meeting.get("location")
+        if not isinstance(location, str) or not location.strip():
+            continue
+        topic_matches = isinstance(topic, str) and _normalized_text(
+            topic
+        ) in _normalized_text(text)
+        location_matches = _normalized_text(location) in _normalized_text(text)
+        if topic_matches or location_matches:
+            return location
+    return None
 
 
 def _is_replace_destination_request(text: str) -> bool:
@@ -9396,6 +10262,59 @@ def _select_requested_route(
             return routes[selected_index]
         return None
     return _select_route(routes, preference)
+
+
+def _select_navigation_requested_route(
+    navigation: NavigationFlow,
+) -> dict[str, Any] | None:
+    if navigation.selected_route_index is not None:
+        return _select_requested_route(
+            navigation.routes,
+            navigation.route_preference,
+            navigation.selected_route_index,
+        )
+    if navigation.toll_avoidance_tolerance_minutes is None:
+        return _select_requested_route(
+            navigation.routes,
+            navigation.route_preference,
+            None,
+        )
+    return _select_toll_aware_route(
+        navigation.routes,
+        navigation.route_preference or "fastest",
+        navigation.toll_avoidance_tolerance_minutes,
+    )
+
+
+def _select_toll_aware_route(
+    routes: list[dict[str, Any]],
+    preference: Literal["fastest", "shortest"],
+    tolerance_minutes: int,
+) -> dict[str, Any] | None:
+    if not routes:
+        return None
+    baseline = _select_route(routes, preference) or routes[0]
+    toll_free_routes = [route for route in routes if not _route_has_toll(route)]
+    if not toll_free_routes:
+        return baseline
+    best_toll_free = min(
+        toll_free_routes,
+        key=lambda route: _route_duration_minutes(route) or float("inf"),
+    )
+    baseline_minutes = _route_duration_minutes(baseline)
+    toll_free_minutes = _route_duration_minutes(best_toll_free)
+    if baseline_minutes is None or toll_free_minutes is None:
+        return best_toll_free
+    if toll_free_minutes - baseline_minutes <= tolerance_minutes:
+        return best_toll_free
+    return baseline
+
+
+def _route_duration_minutes(route: dict[str, Any]) -> int | None:
+    hours = _safe_int(route.get("duration_hours"), 0) or 0
+    minutes = _safe_int(route.get("duration_minutes"), 0) or 0
+    total = hours * 60 + minutes
+    return total if total > 0 else None
 
 
 def _select_route_by_alias(
