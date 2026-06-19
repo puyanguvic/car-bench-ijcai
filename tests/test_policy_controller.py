@@ -1240,7 +1240,11 @@ def test_navigation_controller_defaults_to_fastest_when_replacing_waypoint() -> 
                 {
                     "routes": [
                         {"route_id": "rll_mil_mun_fast", "alias": ["fastest"]},
-                        {"route_id": "rll_mil_mun_short", "alias": ["shortest"]},
+                        {
+                            "route_id": "rll_mil_mun_short",
+                            "alias": ["shortest"],
+                            "includes_toll": True,
+                        },
                     ]
                 },
             )
@@ -1258,6 +1262,30 @@ def test_navigation_controller_defaults_to_fastest_when_replacing_waypoint() -> 
             },
         }
     ]
+
+    action = controller.decide(
+        context_id="ctx-replace-waypoint-fastest-default",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "navigation_replace_one_waypoint",
+                {
+                    "waypoint_replaced": True,
+                    "new_waypoints": [
+                        "loc_wiesbaden",
+                        "loc_milan",
+                        "loc_munich",
+                    ],
+                    "new_routes": ["rll_wie_mil_fast", "rll_mil_mun_fast"],
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "alternative route segment includes toll roads" in action.content
+    assert "would you like more information" in action.content.lower()
 
 
 def test_navigation_controller_does_not_take_over_complex_poi_routes() -> None:

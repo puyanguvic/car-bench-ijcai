@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -141,6 +142,9 @@ class AirCirculationFlow:
     mode: Literal["FRESH_AIR", "RECIRCULATION", "AUTO"] | None = None
     preferences_checked: bool = False
     combined_with_air_conditioning: bool = False
+    combined_fan_level: int | None = None
+    combined_window: str | None = None
+    combined_window_percentage: int | None = None
     completed: bool = False
 
 
@@ -151,8 +155,10 @@ class AirConditioningFlow:
     fan_target_level: int | None = None
     climate_checked: bool = False
     windows_checked: bool = False
+    preserve_open_windows: bool = False
     fan_speed: int | None = None
     air_conditioning: bool | None = None
+    closed_windows_for_ac: bool = False
     window_driver_position: int | None = None
     window_passenger_position: int | None = None
     window_driver_rear_position: int | None = None
@@ -171,6 +177,9 @@ class AirQualityFlow:
 class FanSpeedFlow:
     active: bool = False
     level: int | None = None
+    query_current: bool = False
+    current_checked: bool = False
+    current_level: int | None = None
     preferences_checked: bool = False
     completed: bool = False
 
@@ -180,6 +189,44 @@ class SteeringWheelHeatingFlow:
     active: bool = False
     level: int | None = None
     preferences_checked: bool = False
+    completed: bool = False
+
+
+@dataclass
+class ClimateInspectionFlow:
+    active: bool = False
+    needs_temperature: bool = True
+    needs_seat_heating: bool = False
+    temperature_checked: bool = False
+    seat_heating_checked: bool = False
+    driver_temperature: float | None = None
+    passenger_temperature: float | None = None
+    temperature_unit: str = "Celsius"
+    seat_heating_driver: int | None = None
+    seat_heating_passenger: int | None = None
+    completed: bool = False
+
+
+@dataclass
+class OccupancyComfortFlow:
+    active: bool = False
+    seats_checked: bool = False
+    seats_occupied: dict[str, bool] = field(default_factory=dict)
+    target_temperature: float | None = None
+    target_heating_level: int | None = None
+    temperature_set: bool = False
+    seat_heating_set: bool = False
+    completed: bool = False
+
+
+@dataclass
+class DriverComfortTemperatureFlow:
+    active: bool = False
+    passenger_heating_required: bool = False
+    passenger_heating_off: bool = False
+    target_temperature: float | None = None
+    preferences_checked: bool = False
+    temperature_set: bool = False
     completed: bool = False
 
 
@@ -220,6 +267,7 @@ class NavigationFlow:
     routes_checked: bool = False
     routes: list[dict[str, Any]] = field(default_factory=list)
     route_choice_requested: bool = False
+    route_detail_requested: bool = False
     selected_route_index: int | None = None
     current_navigation_checked: bool = False
     needs_current_navigation: bool = False
@@ -274,9 +322,73 @@ class POIFlow:
 
 
 @dataclass
+class RouteEnergyFlow:
+    active: bool = False
+    destination_name: str | None = None
+    destination_id: str | None = None
+    route_preference: Literal["fastest", "shortest"] | None = None
+    station_route_preference: Literal["fastest", "shortest"] | None = None
+    route_start_id: str | None = None
+    routes_checked: bool = False
+    routes: list[dict[str, Any]] = field(default_factory=list)
+    route_choice_requested: bool = False
+    route_detail_requested: bool = False
+    selected_route_index: int | None = None
+    final_route_via: str | None = None
+    route_lookup: Literal["destination", "setup_to_poi", "setup_from_poi"] | None = None
+    setup_to_poi_checked: bool = False
+    routes_to_poi: list[dict[str, Any]] = field(default_factory=list)
+    setup_from_poi_checked: bool = False
+    routes_from_poi: list[dict[str, Any]] = field(default_factory=list)
+    current_navigation_checked: bool = False
+    needs_current_navigation: bool = False
+    navigation_active: bool | None = None
+    waypoints_id: list[str] = field(default_factory=list)
+    routes_to_final_destination_id: list[str] = field(default_factory=list)
+    route_details: list[dict[str, Any]] = field(default_factory=list)
+    route_id: str | None = None
+    route_selection: Literal["first_segment", "last_segment", "planned_route"] = (
+        "first_segment"
+    )
+    needs_charging_status: bool = False
+    charging_status_checked: bool = False
+    state_of_charge: float | None = None
+    remaining_range_km: float | None = None
+    wants_range: bool = False
+    wants_current_range: bool = False
+    wants_battery_sufficiency: bool = False
+    wants_stop_count: bool = False
+    wants_navigation_setup: bool = False
+    initial_soc: float | None = None
+    final_soc: float | None = None
+    distance_checked: bool = False
+    distance_km: float | None = None
+    wants_charger_search: bool = False
+    search_mode: Literal["nearby", "along_route"] | None = None
+    at_kilometer: float | None = None
+    filters: list[str] = field(default_factory=list)
+    pois_checked: bool = False
+    pois: list[dict[str, Any]] = field(default_factory=list)
+    selected_poi_id: str | None = None
+    selected_poi_name: str | None = None
+    selected_plug_id: str | None = None
+    selected_phone_number: str | None = None
+    wants_charging_time: bool = False
+    target_soc: float | None = None
+    start_soc_for_charging: float | None = None
+    charging_time_checked: bool = False
+    charging_minutes: float | None = None
+    wants_call: bool = False
+    call_completed: bool = False
+    completion_message: str | None = None
+    completed: bool = False
+    failure_message: str | None = None
+
+
+@dataclass
 class EmailFlow:
     active: bool = False
-    mode: Literal["meeting_delay", "share_contact"] | None = None
+    mode: Literal["meeting_delay", "meeting_attendees", "share_contact"] | None = None
     recipient_name: str | None = None
     recipient_first_name: str | None = None
     recipient_last_name: str | None = None
@@ -288,6 +400,8 @@ class EmailFlow:
     subject_contact_id: str | None = None
     subject_email: str | None = None
     subject_phone: str | None = None
+    attendee_contact_ids: list[str] = field(default_factory=list)
+    attendee_emails_by_id: dict[str, str] = field(default_factory=dict)
     calendar_checked: bool = False
     meeting_topic: str | None = None
     meeting_started: bool | None = None
@@ -367,12 +481,22 @@ class ControllerState:
     steering_wheel_heating: SteeringWheelHeatingFlow = field(
         default_factory=SteeringWheelHeatingFlow
     )
+    climate_inspection: ClimateInspectionFlow = field(
+        default_factory=ClimateInspectionFlow
+    )
+    occupancy_comfort: OccupancyComfortFlow = field(
+        default_factory=OccupancyComfortFlow
+    )
+    driver_comfort_temperature: DriverComfortTemperatureFlow = field(
+        default_factory=DriverComfortTemperatureFlow
+    )
     reading_light: ReadingLightFlow = field(default_factory=ReadingLightFlow)
     reading_light_occupancy: ReadingLightOccupancyFlow = field(
         default_factory=ReadingLightOccupancyFlow
     )
     navigation: NavigationFlow = field(default_factory=NavigationFlow)
     poi: POIFlow = field(default_factory=POIFlow)
+    route_energy: RouteEnergyFlow = field(default_factory=RouteEnergyFlow)
     email: EmailFlow = field(default_factory=EmailFlow)
     high_beam: HighBeamFlow = field(default_factory=HighBeamFlow)
     fog_lights: FogLightFlow = field(default_factory=FogLightFlow)
@@ -384,6 +508,17 @@ class ControllerState:
     pending_location_lookup_name: str | None = None
     recent_location_lookup_name: str | None = None
     recent_location_lookup_id: str | None = None
+    recent_charging_pois: list[dict[str, Any]] = field(default_factory=list)
+    recent_charging_route_id: str | None = None
+    recent_charging_at_kilometer: float | None = None
+    recent_selected_charging_poi_id: str | None = None
+    recent_selected_charging_poi_name: str | None = None
+    recent_selected_charging_plug_id: str | None = None
+    recent_selected_charging_phone_number: str | None = None
+    recent_window_positions: dict[str, int] = field(default_factory=dict)
+    recent_air_conditioning: bool | None = None
+    recent_air_circulation: str | None = None
+    pending_direct_response: str | None = None
 
 
 class PolicyAwareController:
@@ -420,7 +555,13 @@ class PolicyAwareController:
         self._clear_completed_flows_with_pending_work(state)
 
         action: NextAction | None = None
-        if state.sunroof.active:
+        if state.pending_direct_response:
+            action = NextAction.respond(
+                state.pending_direct_response,
+                reason="direct_status_response",
+            )
+            state.pending_direct_response = None
+        elif state.sunroof.active:
             action = self._next_sunroof_action(state, tool_index)
         elif state.sunshade.active:
             action = self._next_sunshade_action(state, tool_index)
@@ -442,12 +583,20 @@ class PolicyAwareController:
             action = self._next_fan_speed_action(state, tool_index)
         elif state.steering_wheel_heating.active:
             action = self._next_steering_wheel_heating_action(state, tool_index)
+        elif state.climate_inspection.active:
+            action = self._next_climate_inspection_action(state, tool_index)
+        elif state.occupancy_comfort.active:
+            action = self._next_occupancy_comfort_action(state, tool_index)
+        elif state.driver_comfort_temperature.active:
+            action = self._next_driver_comfort_temperature_action(state, tool_index)
         elif state.reading_light_occupancy.active:
             action = self._next_reading_light_occupancy_action(state, tool_index)
         elif state.reading_light.active:
             action = self._next_reading_light_action(state, tool_index)
         elif state.defrost.active:
             action = self._next_defrost_action(state, tool_index)
+        elif state.route_energy.active:
+            action = self._next_route_energy_action(state, tool_index)
         elif state.poi.active:
             action = self._next_poi_action(state, tool_index)
         elif state.navigation.active:
@@ -458,6 +607,17 @@ class PolicyAwareController:
             action = self._next_high_beam_action(state, tool_index)
         elif state.fog_lights.active:
             action = self._next_fog_lights_action(state, tool_index)
+
+        if (
+            action is None
+            and latest_user_text
+            and _is_contact_lookup_or_call_request(latest_user_text.lower())
+            and not tool_index.has("get_contact_id_by_contact_name")
+        ):
+            action = NextAction.respond(
+                "I can't look up contacts because contact search is unavailable right now.",
+                reason="missing_contact_lookup_tool",
+            )
 
         if action is not None:
             return self._validated_controller_action(action, tool_index)
@@ -519,8 +679,15 @@ class PolicyAwareController:
             state.fan_speed.active and not state.fan_speed.completed,
             state.steering_wheel_heating.active
             and not state.steering_wheel_heating.completed,
+            state.climate_inspection.active
+            and not state.climate_inspection.completed,
+            state.occupancy_comfort.active
+            and not state.occupancy_comfort.completed,
+            state.driver_comfort_temperature.active
+            and not state.driver_comfort_temperature.completed,
             state.defrost.active and not state.defrost.completed,
             state.poi.active and not state.poi.completed,
+            state.route_energy.active and not state.route_energy.completed,
             state.navigation.active and not state.navigation.completed,
             state.email.active and not state.email.completed,
         ]
@@ -537,8 +704,16 @@ class PolicyAwareController:
             state.fan_speed = FanSpeedFlow()
         if state.steering_wheel_heating.completed:
             state.steering_wheel_heating = SteeringWheelHeatingFlow()
+        if state.climate_inspection.completed:
+            state.climate_inspection = ClimateInspectionFlow()
+        if state.occupancy_comfort.completed:
+            state.occupancy_comfort = OccupancyComfortFlow()
+        if state.driver_comfort_temperature.completed:
+            state.driver_comfort_temperature = DriverComfortTemperatureFlow()
         if state.poi.completed:
             state.poi = POIFlow()
+        if state.route_energy.completed:
+            state.route_energy = RouteEnergyFlow()
 
     def _reset_completed_flows_for_new_intent(self, state: ControllerState) -> None:
         if state.sunroof.completed:
@@ -561,10 +736,18 @@ class PolicyAwareController:
             state.fan_speed = FanSpeedFlow()
         if state.steering_wheel_heating.completed:
             state.steering_wheel_heating = SteeringWheelHeatingFlow()
+        if state.climate_inspection.completed:
+            state.climate_inspection = ClimateInspectionFlow()
+        if state.occupancy_comfort.completed:
+            state.occupancy_comfort = OccupancyComfortFlow()
+        if state.driver_comfort_temperature.completed:
+            state.driver_comfort_temperature = DriverComfortTemperatureFlow()
         if state.defrost.completed:
             state.defrost = DefrostFlow()
         if state.poi.completed:
             state.poi = POIFlow()
+        if state.route_energy.completed:
+            state.route_energy = RouteEnergyFlow()
 
     def _sync_runtime_context(
         self, state: ControllerState, messages: list[dict[str, Any]]
@@ -631,9 +814,23 @@ class PolicyAwareController:
         if _contains_new_action_intent(lowered):
             self._reset_completed_flows_for_new_intent(state)
 
+        if _is_window_ac_status_query(lowered):
+            response = _format_recent_window_ac_status(state)
+            if response is not None:
+                state.pending_direct_response = response
+                return
+
         quoted_meeting = _extract_quoted_meeting_topic(text)
         if quoted_meeting is not None:
             state.recent_meeting_topic = quoted_meeting
+
+        if (
+            state.email.active
+            and state.email.mode == "meeting_attendees"
+            and _is_route_energy_request(lowered)
+            and not _is_email_composition_request(lowered)
+        ):
+            state.email = EmailFlow()
 
         sunroof = state.sunroof
         if sunroof.weather_confirmation_requested and _is_affirmative(lowered):
@@ -673,6 +870,24 @@ class PolicyAwareController:
             if subject_name is not None and email.subject_contact_id is None:
                 email.subject_name = subject_name
                 _set_email_flow_name(email, "subject", subject_name)
+                return
+
+        if email.active and email.mode == "meeting_attendees":
+            if email.calendar_checked and not email.attendee_contact_ids:
+                selected = _select_meeting_from_text(
+                    state.recent_calendar_meetings, text
+                )
+                if selected is not None:
+                    _record_email_attendee_meeting(state, selected)
+                    return
+            if (
+                email.attendee_contact_ids
+                and _email_attendee_addresses(email)
+                and email.content_message is None
+                and not _is_affirmative(lowered)
+                and not _is_negative(lowered)
+            ):
+                email.content_message = _normalize_email_content(text)
                 return
 
         window = state.window
@@ -776,6 +991,9 @@ class PolicyAwareController:
                 return
 
         if state.fan_speed.active and state.fan_speed.level is None:
+            if _is_current_fan_speed_query(lowered):
+                state.fan_speed.query_current = True
+                return
             clarified_level = _extract_level(lowered)
             if clarified_level is not None:
                 state.fan_speed.level = clarified_level
@@ -788,6 +1006,36 @@ class PolicyAwareController:
             clarified_level = _extract_heating_level(lowered)
             if clarified_level is not None:
                 state.steering_wheel_heating.level = clarified_level
+                return
+
+        if state.occupancy_comfort.active:
+            clarified_temperature = _extract_temperature_setting(lowered)
+            clarified_level = _extract_heating_level(lowered)
+            updated = False
+            if (
+                clarified_temperature is not None
+                and state.occupancy_comfort.target_temperature is None
+            ):
+                state.occupancy_comfort.target_temperature = clarified_temperature
+                updated = True
+            if (
+                clarified_level is not None
+                and state.occupancy_comfort.target_heating_level is None
+            ):
+                state.occupancy_comfort.target_heating_level = clarified_level
+                updated = True
+            if updated:
+                return
+
+        if (
+            state.driver_comfort_temperature.active
+            and state.driver_comfort_temperature.target_temperature is None
+        ):
+            clarified_temperature = _extract_temperature_setting(lowered)
+            if clarified_temperature is not None:
+                state.driver_comfort_temperature.target_temperature = (
+                    clarified_temperature
+                )
                 return
 
         if state.reading_light.active and state.reading_light.position is None:
@@ -814,6 +1062,9 @@ class PolicyAwareController:
                 return
 
         if navigation.active and navigation.route_choice_requested:
+            if _is_route_choice_preview_request(lowered):
+                navigation.route_detail_requested = True
+                return
             route_index = _extract_route_choice_index(lowered)
             if route_index is not None:
                 navigation.selected_route_index = route_index
@@ -828,6 +1079,55 @@ class PolicyAwareController:
             if _is_affirmative(lowered) and _route_choice_is_unambiguous(choice_routes):
                 navigation.route_preference = "fastest"
                 navigation.route_choice_requested = False
+                return
+
+        route_energy = state.route_energy
+        if route_energy.active:
+            if _is_navigation_delete_waypoint_request(lowered):
+                state.route_energy = RouteEnergyFlow()
+                state.navigation = _new_navigation_delete_waypoint_flow(text)
+                return
+
+            if _is_navigation_delete_destination_request(lowered):
+                state.route_energy = RouteEnergyFlow()
+                state.navigation = _new_navigation_delete_destination_flow(text, state)
+                return
+
+            if _is_meeting_attendees_email_request(lowered):
+                state.email = _new_meeting_attendees_email_flow(text, state)
+                state.route_energy = RouteEnergyFlow()
+                return
+
+            if route_energy.route_choice_requested:
+                if _is_route_choice_preview_request(lowered):
+                    route_energy.route_detail_requested = True
+                    return
+                route_index = _extract_route_choice_index(lowered)
+                if route_index is None:
+                    route_index = _select_route_index_by_via(
+                        route_energy.routes, lowered
+                    )
+                if route_index is not None:
+                    route_energy.selected_route_index = route_index
+                    route_energy.route_choice_requested = False
+                    _update_route_energy_from_text(route_energy, text)
+                    return
+                route_preference = _extract_route_preference(lowered)
+                if route_preference is not None:
+                    route_energy.route_preference = route_preference
+                    route_energy.route_choice_requested = False
+                    _update_route_energy_from_text(route_energy, text)
+                    return
+
+            if route_energy.selected_poi_id is None and route_energy.pois:
+                selected = _select_poi_from_text(route_energy.pois, text)
+                if selected is not None:
+                    _record_route_energy_selected_poi(route_energy, selected)
+                    _update_route_energy_from_text(route_energy, text)
+                    return
+
+            if _is_route_energy_request(lowered):
+                _update_route_energy_from_text(route_energy, text)
                 return
 
         if state.poi.active and _is_navigation_delete_destination_request(lowered):
@@ -875,22 +1175,28 @@ class PolicyAwareController:
                 ),
             )
         elif _is_window_open_request(lowered):
+            window_percentage = _extract_window_percentage(lowered)
             state.window = WindowFlow(
                 active=True,
                 window=_extract_window_target(lowered),
-                target_percentage=_extract_window_percentage(lowered),
+                target_percentage=window_percentage,
             )
             if _is_air_conditioning_request(lowered):
                 state.air_conditioning = AirConditioningFlow(
                     active=True,
                     on=not _is_air_conditioning_off_request(lowered),
                     fan_target_level=_extract_level(lowered),
+                    preserve_open_windows=(
+                        window_percentage is None or window_percentage > 0
+                    ),
                 )
             if _is_air_circulation_request(lowered):
                 state.air_circulation = AirCirculationFlow(
                     active=True,
                     mode=_extract_air_circulation_mode(lowered),
                     combined_with_air_conditioning=True,
+                    combined_window=_extract_window_target(lowered),
+                    combined_window_percentage=window_percentage,
                 )
         elif _is_ambient_light_request(lowered):
             state.ambient_light = AmbientLightFlow(
@@ -921,8 +1227,28 @@ class PolicyAwareController:
                 active=True,
                 mode=_extract_air_circulation_mode(lowered),
             )
+        elif _is_occupancy_comfort_request(lowered):
+            state.occupancy_comfort = OccupancyComfortFlow(
+                active=True,
+                target_temperature=_extract_temperature_setting(lowered),
+                target_heating_level=_extract_heating_level(lowered),
+            )
+        elif _is_driver_comfort_temperature_request(lowered):
+            state.driver_comfort_temperature = DriverComfortTemperatureFlow(
+                active=True,
+                passenger_heating_required=_requests_passenger_heating_off(lowered),
+                target_temperature=_extract_temperature_setting(lowered),
+            )
+        elif _is_climate_inspection_request(lowered):
+            state.climate_inspection = ClimateInspectionFlow(
+                active=True,
+                needs_temperature=_mentions_temperature_setting(lowered),
+                needs_seat_heating=_mentions_seat_heating(lowered),
+            )
         elif _is_air_quality_question(lowered):
             state.air_quality = AirQualityFlow(active=True)
+        elif _is_current_fan_speed_query(lowered):
+            state.fan_speed = FanSpeedFlow(active=True, query_current=True)
         elif _is_fan_speed_request(lowered):
             state.fan_speed = FanSpeedFlow(
                 active=True,
@@ -951,6 +1277,26 @@ class PolicyAwareController:
                 on=not _is_light_off_request(lowered),
                 defrost_window=_extract_defrost_window(lowered),
             )
+        elif _is_navigation_delete_destination_request(lowered):
+            state.navigation = _new_navigation_delete_destination_flow(text, state)
+        elif _is_meeting_attendees_email_request(lowered):
+            state.email = _new_meeting_attendees_email_flow(text, state)
+        elif _is_route_energy_request(lowered) or _is_recent_charging_stop_navigation_request(
+            lowered, state
+        ):
+            state.route_energy = _new_route_energy_flow(text)
+            if _is_recent_charging_stop_navigation_request(lowered, state):
+                state.route_energy.wants_navigation_setup = True
+            _hydrate_route_energy_from_recent(state.route_energy, state)
+            if (
+                state.route_energy.selected_poi_id is None
+                and state.route_energy.pois
+            ):
+                selected = _select_poi_from_text(state.route_energy.pois, text)
+                if selected is not None:
+                    _record_route_energy_selected_poi(state.route_energy, selected)
+            if state.route_energy.active:
+                state.poi = POIFlow()
         elif _is_poi_request(lowered):
             location_name = _extract_poi_location(text)
             state.poi = POIFlow(
@@ -968,25 +1314,6 @@ class PolicyAwareController:
                 or "instead" in lowered,
                 do_not_set_navigation=_do_not_set_navigation(lowered),
             )
-        elif _is_navigation_delete_destination_request(lowered):
-            previous_navigation = state.navigation
-            destination_name = _extract_navigation_destination_to_delete(text)
-            destination_id = _matching_recent_location_id(
-                destination_name,
-                previous_navigation.destination_name,
-                previous_navigation.destination_id,
-            ) or _matching_recent_location_id(
-                destination_name,
-                state.recent_location_lookup_name,
-                state.recent_location_lookup_id,
-            )
-            state.navigation = NavigationFlow(
-                active=True,
-                mode="delete_final_destination",
-                destination_name=destination_name,
-                destination_id=destination_id,
-                needs_current_navigation=destination_id is None,
-            )
         elif _is_navigation_replace_waypoint_request(lowered):
             state.navigation = NavigationFlow(
                 active=True,
@@ -997,13 +1324,7 @@ class PolicyAwareController:
                 needs_current_navigation=True,
             )
         elif _is_navigation_delete_waypoint_request(lowered):
-            state.navigation = NavigationFlow(
-                active=True,
-                mode="delete_waypoint",
-                waypoint_name=_extract_navigation_waypoint_to_delete(text),
-                route_preference=_extract_route_preference(lowered),
-                needs_current_navigation=True,
-            )
+            state.navigation = _new_navigation_delete_waypoint_flow(text)
         elif _is_vague_navigation_destination_request(lowered):
             state.navigation = NavigationFlow(
                 active=True,
@@ -1151,6 +1472,15 @@ class PolicyAwareController:
                     and state.steering_wheel_heating.level is None
                 ):
                     state.steering_wheel_heating.level = preferred_heating_level
+                state.driver_comfort_temperature.preferences_checked = True
+                preferred_temperature = _extract_preferred_temperature(result)
+                if (
+                    preferred_temperature is not None
+                    and state.driver_comfort_temperature.target_temperature is None
+                ):
+                    state.driver_comfort_temperature.target_temperature = (
+                        preferred_temperature
+                    )
                 state.business_email_extra_recipients = (
                     state.business_email_extra_recipients
                     + [
@@ -1191,6 +1521,7 @@ class PolicyAwareController:
                 if isinstance(ac_value, bool):
                     state.window.ac_on = ac_value
                     state.air_conditioning.air_conditioning = ac_value
+                    state.recent_air_conditioning = ac_value
 
                 state.defrost.climate_checked = True
                 fan_speed = _safe_int(result.get("fan_speed"), state.defrost.fan_speed)
@@ -1207,6 +1538,37 @@ class PolicyAwareController:
                 if state.air_quality.active:
                     state.air_quality.climate_checked = True
                     state.air_quality.fan_speed = fan_speed
+                if state.fan_speed.active and state.fan_speed.query_current:
+                    state.fan_speed.current_checked = True
+                    state.fan_speed.current_level = fan_speed
+                air_circulation = result.get("air_circulation")
+                if isinstance(air_circulation, str):
+                    state.recent_air_circulation = air_circulation
+            elif name == "get_temperature_inside_car" and isinstance(result, dict):
+                climate = state.climate_inspection
+                climate.temperature_checked = True
+                climate.driver_temperature = _safe_float(
+                    result.get("climate_temperature_driver"),
+                    climate.driver_temperature,
+                )
+                climate.passenger_temperature = _safe_float(
+                    result.get("climate_temperature_passenger"),
+                    climate.passenger_temperature,
+                )
+                unit = result.get("temperature_unit")
+                if isinstance(unit, str) and unit.strip():
+                    climate.temperature_unit = unit.strip()
+            elif name == "get_seat_heating_level" and isinstance(result, dict):
+                climate = state.climate_inspection
+                climate.seat_heating_checked = True
+                climate.seat_heating_driver = _safe_int(
+                    result.get("seat_heating_driver"),
+                    climate.seat_heating_driver,
+                )
+                climate.seat_heating_passenger = _safe_int(
+                    result.get("seat_heating_passenger"),
+                    climate.seat_heating_passenger,
+                )
             elif name == "open_close_window" and isinstance(result, dict):
                 state.window.completed = True
                 state.window.target_percentage = _safe_int(
@@ -1217,12 +1579,15 @@ class PolicyAwareController:
                     state.window.window = window
                     percentage = _safe_int(result.get("percentage"))
                     if percentage is not None:
+                        _record_recent_window_position(state, window, percentage)
                         _record_defrost_window_position(
                             state.defrost, window, percentage
                         )
                         _record_air_conditioning_window_position(
                             state.air_conditioning, window, percentage
                         )
+                        if state.air_conditioning.active and percentage == 0:
+                            state.air_conditioning.closed_windows_for_ac = True
                         _record_window_match_position(
                             state.window_match, window, percentage
                         )
@@ -1244,6 +1609,7 @@ class PolicyAwareController:
                 mode = result.get("mode")
                 if mode in {"FRESH_AIR", "RECIRCULATION", "AUTO"}:
                     state.air_circulation.mode = mode
+                    state.recent_air_circulation = mode
             elif name == "get_exterior_lights_status" and isinstance(result, dict):
                 state.high_beam.exterior_lights_checked = True
                 fog_lights = result.get("fog_lights")
@@ -1333,6 +1699,11 @@ class PolicyAwareController:
                     state.defrost.fan_speed = level
                     state.fan_speed.level = level
                     state.air_conditioning.fan_speed = level
+                    if (
+                        state.air_circulation.active
+                        and state.air_circulation.combined_with_air_conditioning
+                    ):
+                        state.air_circulation.combined_fan_level = level
                 if state.fan_speed.active:
                     state.fan_speed.completed = True
             elif name == "set_fan_airflow_direction" and isinstance(result, dict):
@@ -1345,6 +1716,7 @@ class PolicyAwareController:
                     state.defrost.air_conditioning = on_value
                     state.air_conditioning.air_conditioning = on_value
                     state.air_conditioning.on = on_value
+                    state.recent_air_conditioning = on_value
                 if state.air_conditioning.active:
                     state.air_conditioning.completed = True
             elif name == "set_window_defrost" and isinstance(result, dict):
@@ -1363,6 +1735,39 @@ class PolicyAwareController:
                 )
                 if level is not None:
                     state.steering_wheel_heating.level = level
+            elif name == "set_climate_temperature" and isinstance(result, dict):
+                if state.occupancy_comfort.active:
+                    state.occupancy_comfort.temperature_set = True
+                    temperature = _safe_float(
+                        result.get("temperature"),
+                        state.occupancy_comfort.target_temperature,
+                    )
+                    if temperature is not None:
+                        state.occupancy_comfort.target_temperature = temperature
+                if state.driver_comfort_temperature.active:
+                    state.driver_comfort_temperature.temperature_set = True
+                    temperature = _safe_float(
+                        result.get("temperature"),
+                        state.driver_comfort_temperature.target_temperature,
+                    )
+                    if temperature is not None:
+                        state.driver_comfort_temperature.target_temperature = (
+                            temperature
+                        )
+            elif name == "set_seat_heating" and isinstance(result, dict):
+                if state.occupancy_comfort.active:
+                    state.occupancy_comfort.seat_heating_set = True
+                    level = _safe_int(
+                        result.get("level"),
+                        state.occupancy_comfort.target_heating_level,
+                    )
+                    if level is not None:
+                        state.occupancy_comfort.target_heating_level = level
+                if state.driver_comfort_temperature.active:
+                    seat_zone = result.get("seat_zone")
+                    level = _safe_int(result.get("level"))
+                    if seat_zone == "PASSENGER" and level == 0:
+                        state.driver_comfort_temperature.passenger_heating_off = True
             elif name == "set_reading_light" and isinstance(result, dict):
                 if state.reading_light_occupancy.active:
                     if state.reading_light_occupancy.pending_actions:
@@ -1383,7 +1788,42 @@ class PolicyAwareController:
                             str(seat): bool(occupied)
                             for seat, occupied in seats.items()
                         }
+                if state.occupancy_comfort.active:
+                    state.occupancy_comfort.seats_checked = True
+                    if isinstance(seats, dict):
+                        state.occupancy_comfort.seats_occupied = {
+                            str(seat): bool(occupied)
+                            for seat, occupied in seats.items()
+                        }
             elif name == "get_current_navigation_state":
+                if state.route_energy.active:
+                    route_energy = state.route_energy
+                    route_energy.current_navigation_checked = True
+                    if isinstance(result, dict):
+                        active = result.get("navigation_active")
+                        if isinstance(active, bool):
+                            route_energy.navigation_active = active
+                        waypoints = result.get("waypoints_id")
+                        if isinstance(waypoints, list):
+                            route_energy.waypoints_id = [
+                                str(waypoint)
+                                for waypoint in waypoints
+                                if isinstance(waypoint, str)
+                            ]
+                        routes = result.get("routes_to_final_destination_id")
+                        if isinstance(routes, list):
+                            route_energy.routes_to_final_destination_id = [
+                                str(route) for route in routes if isinstance(route, str)
+                            ]
+                        details = result.get("details")
+                        if isinstance(details, dict):
+                            route_details = details.get("routes")
+                            if isinstance(route_details, list):
+                                route_energy.route_details = [
+                                    route
+                                    for route in route_details
+                                    if isinstance(route, dict)
+                                ]
                 if state.navigation.active:
                     state.navigation.current_navigation_checked = True
                     if isinstance(result, dict):
@@ -1422,6 +1862,11 @@ class PolicyAwareController:
                     if state.email.active and state.email.mode == "meeting_delay":
                         state.email.calendar_checked = True
                         _record_email_meeting_status(state)
+                    elif (
+                        state.email.active
+                        and state.email.mode == "meeting_attendees"
+                    ):
+                        state.email.calendar_checked = True
             elif name == "get_location_id_by_location_name":
                 if isinstance(result, dict) and isinstance(result.get("id"), str):
                     if state.pending_location_lookup_name:
@@ -1432,6 +1877,11 @@ class PolicyAwareController:
                         state.pending_location_lookup_name = None
                     if state.poi.active and state.poi.location_id is None:
                         state.poi.location_id = result["id"]
+                    if (
+                        state.route_energy.active
+                        and state.route_energy.destination_id is None
+                    ):
+                        state.route_energy.destination_id = result["id"]
                     if state.navigation.active:
                         if state.navigation.mode == "replace_one_waypoint":
                             state.navigation.new_waypoint_id = result["id"]
@@ -1440,6 +1890,14 @@ class PolicyAwareController:
                 elif state.poi.active and state.poi.location_id is None:
                     location = state.poi.location_name or "that location"
                     state.poi.failure_message = f"I couldn't find {location}."
+                elif (
+                    state.route_energy.active
+                    and state.route_energy.destination_id is None
+                ):
+                    destination = state.route_energy.destination_name or "that destination"
+                    state.route_energy.failure_message = (
+                        f"I couldn't find a location ID for {destination}."
+                    )
                 elif state.navigation.active:
                     destination = (
                         state.navigation.new_waypoint_name
@@ -1450,7 +1908,24 @@ class PolicyAwareController:
                         f"I couldn't find a location ID for {destination}."
                     )
             elif name == "search_poi_at_location":
-                if state.poi.active:
+                if state.route_energy.active and state.route_energy.search_mode == "nearby":
+                    state.route_energy.pois_checked = True
+                    if isinstance(result, dict) and isinstance(
+                        result.get("pois_found"), list
+                    ):
+                        state.route_energy.pois = [
+                            poi
+                            for poi in result["pois_found"]
+                            if isinstance(poi, dict)
+                        ]
+                        state.recent_charging_pois = list(state.route_energy.pois)
+                        state.recent_charging_route_id = None
+                        state.recent_charging_at_kilometer = None
+                    if not state.route_energy.pois:
+                        state.route_energy.failure_message = (
+                            "I couldn't find matching charging stations there."
+                        )
+                elif state.poi.active:
                     state.poi.pois_checked = True
                     if isinstance(result, dict) and isinstance(
                         result.get("pois_found"), list
@@ -1475,7 +1950,18 @@ class PolicyAwareController:
                     routes = [
                         route for route in result["routes"] if isinstance(route, dict)
                     ]
-                    if state.poi.active and state.poi.selected_poi_id is not None:
+                    if state.route_energy.active:
+                        route_energy = state.route_energy
+                        if route_energy.route_lookup == "setup_to_poi":
+                            route_energy.setup_to_poi_checked = True
+                            route_energy.routes_to_poi = routes
+                        elif route_energy.route_lookup == "setup_from_poi":
+                            route_energy.setup_from_poi_checked = True
+                            route_energy.routes_from_poi = routes
+                        else:
+                            route_energy.routes_checked = True
+                            route_energy.routes = routes
+                    elif state.poi.active and state.poi.selected_poi_id is not None:
                         state.poi.routes_checked = True
                         state.poi.routes = routes
                     else:
@@ -1483,6 +1969,10 @@ class PolicyAwareController:
                     if not routes:
                         if state.poi.active and state.poi.selected_poi_id is not None:
                             state.poi.failure_message = (
+                                "I couldn't find a route to that destination."
+                            )
+                        elif state.route_energy.active:
+                            state.route_energy.failure_message = (
                                 "I couldn't find a route to that destination."
                             )
                         else:
@@ -1495,11 +1985,72 @@ class PolicyAwareController:
                     state.poi.failure_message = (
                         "I couldn't find a route to that destination."
                     )
+                elif state.route_energy.active:
+                    route_energy = state.route_energy
+                    if route_energy.route_lookup == "setup_to_poi":
+                        route_energy.setup_to_poi_checked = True
+                        route_energy.routes_to_poi = []
+                    elif route_energy.route_lookup == "setup_from_poi":
+                        route_energy.setup_from_poi_checked = True
+                        route_energy.routes_from_poi = []
+                    else:
+                        route_energy.routes_checked = True
+                        route_energy.routes = []
+                    route_energy.failure_message = (
+                        "I couldn't find a route to that destination."
+                    )
                 elif state.navigation.active:
                     _record_navigation_routes(state.navigation, [])
                     state.navigation.failure_message = (
                         "I couldn't find a route to that destination."
                     )
+            elif name == "get_charging_specs_and_status":
+                if state.route_energy.active:
+                    charging = state.route_energy
+                    charging.charging_status_checked = True
+                    if isinstance(result, dict):
+                        state_of_charge = _safe_float(result.get("state_of_charge"))
+                        if state_of_charge is not None:
+                            charging.state_of_charge = state_of_charge
+                            if charging.initial_soc is None:
+                                charging.initial_soc = state_of_charge
+                        remaining_range = _extract_km_value(result.get("remaining_range"))
+                        if remaining_range is not None:
+                            charging.remaining_range_km = remaining_range
+            elif name == "get_distance_by_soc":
+                if state.route_energy.active:
+                    charging = state.route_energy
+                    charging.distance_checked = True
+                    if isinstance(result, dict):
+                        charging.distance_km = _extract_first_km_value(result)
+            elif name == "search_poi_along_the_route":
+                if state.route_energy.active:
+                    charging = state.route_energy
+                    charging.pois_checked = True
+                    if isinstance(result, dict) and isinstance(
+                        result.get("pois_found_along_route"), list
+                    ):
+                        charging.pois = [
+                            poi
+                            for poi in result["pois_found_along_route"]
+                            if isinstance(poi, dict)
+                        ]
+                        state.recent_charging_pois = list(charging.pois)
+                        state.recent_charging_route_id = charging.route_id
+                        state.recent_charging_at_kilometer = charging.at_kilometer
+                    if not charging.pois:
+                        charging.failure_message = (
+                            "I couldn't find matching charging stations along the route."
+                        )
+            elif name == "calculate_charging_time_by_soc":
+                if state.route_energy.active:
+                    charging = state.route_energy
+                    charging.charging_time_checked = True
+                    if isinstance(result, dict):
+                        charging.charging_minutes = _extract_minutes_value(result)
+            elif name == "call_phone_by_number":
+                if state.route_energy.active:
+                    state.route_energy.call_completed = True
             elif name in {
                 "set_new_navigation",
                 "navigation_replace_final_destination",
@@ -1507,7 +2058,10 @@ class PolicyAwareController:
                 "navigation_delete_waypoint",
                 "navigation_replace_one_waypoint",
             } and isinstance(result, dict):
-                state.navigation.completed = True
+                if state.route_energy.active and name == "set_new_navigation":
+                    state.route_energy.completed = True
+                else:
+                    state.navigation.completed = True
                 if state.poi.active and state.poi.replace_final_destination:
                     state.poi.completed = True
                 waypoints = result.get("new_waypoints")
@@ -1951,9 +2505,24 @@ class PolicyAwareController:
 
         if air.completed:
             if air.combined_with_air_conditioning:
+                completed = []
+                window_summary = _format_combined_window_completion(
+                    air.combined_window,
+                    air.combined_window_percentage,
+                )
+                if window_summary:
+                    completed.append(window_summary)
+                completed.append("turned on the air conditioning")
+                if air.combined_fan_level is not None:
+                    completed.append(
+                        f"set the fan speed to level {air.combined_fan_level}"
+                    )
+                completed.append(
+                    "set air circulation to "
+                    f"{_friendly_air_mode(air.mode)}"
+                )
                 return NextAction.respond(
-                    "Done, the air conditioning is on and air circulation is set to "
-                    f"{_friendly_air_mode(air.mode)}.",
+                    f"Done, I {_join_completed_actions(completed)}.",
                     reason="air_circulation_done",
                 )
             return NextAction.respond(
@@ -2002,9 +2571,10 @@ class PolicyAwareController:
 
         if ac.completed:
             on = ac.on
+            content = _format_air_conditioning_completion(ac)
             state.air_conditioning = AirConditioningFlow()
             return NextAction.respond(
-                "Done, the air conditioning is on."
+                content
                 if on
                 else "Done, the air conditioning is off.",
                 reason="air_conditioning_done",
@@ -2040,7 +2610,7 @@ class PolicyAwareController:
                 reason="air_conditioning_climate_check",
             )
 
-        if not ac.windows_checked:
+        if not ac.preserve_open_windows and not ac.windows_checked:
             if not tool_index.has("get_vehicle_window_positions"):
                 return NextAction.respond(
                     "I can't safely turn on the air conditioning because the window position check is unavailable right now.",
@@ -2051,13 +2621,15 @@ class PolicyAwareController:
                 reason="air_conditioning_window_position_check",
             )
 
-        if _air_conditioning_window_status_unknown(ac):
+        if not ac.preserve_open_windows and _air_conditioning_window_status_unknown(ac):
             return NextAction.respond(
                 "I can't safely turn on the air conditioning because I couldn't determine all window positions first.",
                 reason="air_conditioning_unknown_window_positions",
             )
 
-        open_windows = _air_conditioning_open_windows(ac)
+        open_windows = (
+            [] if ac.preserve_open_windows else _air_conditioning_open_windows(ac)
+        )
         if open_windows:
             if not tool_index.has("open_close_window"):
                 return NextAction.respond(
@@ -2084,7 +2656,7 @@ class PolicyAwareController:
             )
 
         target_level = ac.fan_target_level
-        if target_level is None and (ac.fan_speed is None or ac.fan_speed == 0):
+        if target_level is None and ac.fan_speed == 0:
             target_level = 1
 
         if target_level is not None and ac.fan_speed != target_level:
@@ -2105,9 +2677,10 @@ class PolicyAwareController:
             )
 
         if ac.air_conditioning is True:
+            content = _format_air_conditioning_completion(ac)
             state.air_conditioning = AirConditioningFlow()
             return NextAction.respond(
-                "Done, the air conditioning is on.",
+                content,
                 reason="air_conditioning_already_on",
             )
 
@@ -2147,6 +2720,30 @@ class PolicyAwareController:
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
         fan = state.fan_speed
+
+        if fan.query_current:
+            if not fan.current_checked:
+                if not tool_index.has("get_climate_settings"):
+                    state.fan_speed = FanSpeedFlow()
+                    return NextAction.respond(
+                        "I can't look up the current fan speed because the climate settings check is unavailable right now.",
+                        reason="fan_speed_missing_climate_tool",
+                    )
+                return NextAction.tool_call(
+                    "get_climate_settings",
+                    reason="fan_speed_current_check",
+                )
+            level = fan.current_level
+            state.fan_speed = FanSpeedFlow()
+            if level is None:
+                return NextAction.respond(
+                    "I can't determine the current fan speed from the available climate settings.",
+                    reason="fan_speed_current_unknown",
+                )
+            return NextAction.respond(
+                f"The current fan speed is level {level}.",
+                reason="fan_speed_current",
+            )
 
         if fan.completed:
             level = fan.level if fan.level is not None else "the requested level"
@@ -2244,6 +2841,236 @@ class PolicyAwareController:
             "set_steering_wheel_heating",
             {"level": heating.level},
             reason="steering_wheel_heating_set",
+        )
+
+    def _next_climate_inspection_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        climate = state.climate_inspection
+
+        if climate.needs_temperature and not climate.temperature_checked:
+            if not tool_index.has("get_temperature_inside_car"):
+                climate.completed = True
+                return NextAction.respond(
+                    "I can't check the current cabin temperature because that information is unavailable right now.",
+                    reason="climate_inspection_missing_temperature_tool",
+                )
+            return NextAction.tool_call(
+                "get_temperature_inside_car",
+                reason="climate_inspection_temperature_check",
+            )
+
+        if climate.needs_seat_heating and not climate.seat_heating_checked:
+            if not tool_index.has("get_seat_heating_level"):
+                climate.completed = True
+                return NextAction.respond(
+                    "I can't check the current seat heating levels because that information is unavailable right now.",
+                    reason="climate_inspection_missing_seat_heating_tool",
+                )
+            return NextAction.tool_call(
+                "get_seat_heating_level",
+                reason="climate_inspection_seat_heating_check",
+            )
+
+        if climate.needs_temperature and (
+            climate.driver_temperature is None
+            or climate.passenger_temperature is None
+        ):
+            climate.completed = True
+            return NextAction.respond(
+                "I can't determine the current cabin temperatures from the available tool result.",
+                reason="climate_inspection_missing_temperature_result",
+            )
+
+        if climate.needs_seat_heating and (
+            climate.seat_heating_driver is None
+            or climate.seat_heating_passenger is None
+        ):
+            climate.completed = True
+            return NextAction.respond(
+                "I can't determine the current seat heating levels from the available tool result.",
+                reason="climate_inspection_missing_seat_heating_result",
+            )
+
+        climate.completed = True
+        return NextAction.respond(
+            _format_climate_inspection_summary(climate),
+            reason="climate_inspection_done",
+        )
+
+    def _next_occupancy_comfort_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        comfort = state.occupancy_comfort
+
+        if not comfort.seats_checked:
+            if not tool_index.has("get_seats_occupancy"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't tell which seats are occupied, so I can't optimize comfort by occupied seats right now.",
+                    reason="occupancy_comfort_missing_occupancy_tool",
+                )
+            return NextAction.tool_call(
+                "get_seats_occupancy",
+                reason="occupancy_comfort_occupancy_check",
+            )
+
+        if not comfort.seats_occupied:
+            comfort.completed = True
+            return NextAction.respond(
+                "I can't tell which seats are occupied, so I can't optimize seat heating by occupancy.",
+                reason="occupancy_comfort_missing_occupancy_result",
+            )
+
+        if comfort.target_temperature is None:
+            return NextAction.respond(
+                "What cabin temperature should I set?",
+                reason="occupancy_comfort_temperature_disambiguation",
+            )
+
+        if comfort.target_heating_level is None:
+            return NextAction.respond(
+                "What seat heating level should I use for the occupied seats?",
+                reason="occupancy_comfort_heating_level_disambiguation",
+            )
+
+        if not comfort.temperature_set:
+            if not tool_index.has("set_climate_temperature"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the cabin temperature because that control is unavailable right now.",
+                    reason="occupancy_comfort_missing_temperature_tool",
+                )
+            temperature_args = tool_index.arg_names("set_climate_temperature")
+            if "seat_zone" not in temperature_args or "temperature" not in temperature_args:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the cabin temperature because the required temperature controls are unavailable right now.",
+                    reason="occupancy_comfort_missing_temperature_parameter",
+                )
+            return NextAction.tool_call(
+                "set_climate_temperature",
+                {
+                    "seat_zone": "ALL_ZONES",
+                    "temperature": comfort.target_temperature,
+                },
+                reason="occupancy_comfort_set_temperature",
+            )
+
+        if not comfort.seat_heating_set:
+            if not tool_index.has("set_seat_heating"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set seat heating because that control is unavailable right now.",
+                    reason="occupancy_comfort_missing_seat_heating_tool",
+                )
+            seat_args = tool_index.arg_names("set_seat_heating")
+            if "seat_zone" not in seat_args or "level" not in seat_args:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set seat heating by occupied seat because the required seat heating controls are unavailable right now.",
+                    reason="occupancy_comfort_missing_seat_heating_parameter",
+                )
+            seat_zone = _seat_heating_zone_for_occupied_front_seats(
+                comfort.seats_occupied
+            )
+            if seat_zone is None:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set seat heating for the occupied seats with the available seat controls.",
+                    reason="occupancy_comfort_no_supported_occupied_seat",
+                )
+            return NextAction.tool_call(
+                "set_seat_heating",
+                {
+                    "seat_zone": seat_zone,
+                    "level": comfort.target_heating_level,
+                },
+                reason="occupancy_comfort_set_seat_heating",
+            )
+
+        comfort.completed = True
+        return NextAction.respond(
+            "Done, I set the cabin temperature to "
+            f"{_format_temperature_target(comfort.target_temperature)} "
+            "and adjusted seat heating for the occupied seats.",
+            reason="occupancy_comfort_done",
+        )
+
+    def _next_driver_comfort_temperature_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        comfort = state.driver_comfort_temperature
+
+        if comfort.passenger_heating_required and not comfort.passenger_heating_off:
+            if not tool_index.has("set_seat_heating"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't turn off the passenger seat heating because that control is unavailable right now.",
+                    reason="driver_comfort_missing_seat_heating_tool",
+                )
+            seat_args = tool_index.arg_names("set_seat_heating")
+            if "seat_zone" not in seat_args or "level" not in seat_args:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't turn off the passenger seat heating because the required seat heating controls are unavailable right now.",
+                    reason="driver_comfort_missing_seat_heating_parameter",
+                )
+            return NextAction.tool_call(
+                "set_seat_heating",
+                {"seat_zone": "PASSENGER", "level": 0},
+                reason="driver_comfort_passenger_heating_off",
+            )
+
+        if comfort.target_temperature is None:
+            if not comfort.preferences_checked and tool_index.has(
+                "get_user_preferences"
+            ):
+                return NextAction.tool_call(
+                    "get_user_preferences",
+                    {
+                        "preference_categories": {
+                            "vehicle_settings": {"climate_control": True}
+                        }
+                    },
+                    reason="driver_comfort_temperature_preferences",
+                )
+            return NextAction.respond(
+                "What driver temperature should I set?",
+                reason="driver_comfort_temperature_disambiguation",
+            )
+
+        if not comfort.temperature_set:
+            if not tool_index.has("set_climate_temperature"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the driver temperature because that control is unavailable right now.",
+                    reason="driver_comfort_missing_temperature_tool",
+                )
+            temperature_args = tool_index.arg_names("set_climate_temperature")
+            if "seat_zone" not in temperature_args or "temperature" not in temperature_args:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the driver temperature because the required temperature controls are unavailable right now.",
+                    reason="driver_comfort_missing_temperature_parameter",
+                )
+            return NextAction.tool_call(
+                "set_climate_temperature",
+                {"seat_zone": "DRIVER", "temperature": comfort.target_temperature},
+                reason="driver_comfort_set_temperature",
+            )
+
+        comfort.completed = True
+        if comfort.passenger_heating_required:
+            return NextAction.respond(
+                "Done, I turned off passenger seat heating and set the driver temperature to "
+                f"{_format_temperature_target(comfort.target_temperature)}.",
+                reason="driver_comfort_done",
+            )
+        return NextAction.respond(
+            "Done, I set the driver temperature to "
+            f"{_format_temperature_target(comfort.target_temperature)}.",
+            reason="driver_comfort_done",
         )
 
     def _next_reading_light_occupancy_action(
@@ -2376,7 +3203,46 @@ class PolicyAwareController:
                 reason="email_contact_disambiguation",
             )
 
-        if email.recipient_contact_id is None:
+        if email.mode == "meeting_attendees":
+            if not email.calendar_checked:
+                if state.recent_calendar_meetings:
+                    email.calendar_checked = True
+                elif not tool_index.has("get_entries_from_calendar"):
+                    return NextAction.respond(
+                        "I can't look up the meeting attendees because calendar lookup is unavailable right now.",
+                        reason="email_missing_calendar_tool",
+                    )
+                else:
+                    calendar_args = _calendar_arguments(state.runtime)
+                    if calendar_args is None:
+                        return NextAction.respond(
+                            "I need today's date before I can look up the meeting attendees.",
+                            reason="email_missing_calendar_context",
+                        )
+                    return NextAction.tool_call(
+                        "get_entries_from_calendar",
+                        calendar_args,
+                        reason="email_calendar_lookup",
+                    )
+
+            if not email.attendee_contact_ids:
+                selected = _select_meeting(
+                    state.recent_calendar_meetings, email.meeting_topic
+                )
+                if selected is None:
+                    return NextAction.respond(
+                        _format_meeting_choice_prompt(state.recent_calendar_meetings),
+                        reason="email_meeting_disambiguation",
+                    )
+                _record_email_attendee_meeting(state, selected)
+
+            if not email.attendee_contact_ids:
+                return NextAction.respond(
+                    "I can't send the email because I couldn't find attendees for that meeting.",
+                    reason="email_missing_attendees",
+                )
+
+        if email.mode != "meeting_attendees" and email.recipient_contact_id is None:
             return self._next_email_contact_lookup(
                 email,
                 tool_index,
@@ -2440,7 +3306,13 @@ class PolicyAwareController:
                 reason="email_contact_information_lookup",
             )
 
-        if email.recipient_email is None:
+        if email.mode == "meeting_attendees":
+            if not _email_attendee_addresses(email):
+                return NextAction.respond(
+                    "I can't send the email because I couldn't find email addresses for the meeting attendees.",
+                    reason="email_missing_attendee_addresses",
+                )
+        elif email.recipient_email is None:
             return NextAction.respond(
                 "I can't send the email because I couldn't find the recipient's email address.",
                 reason="email_missing_recipient_address",
@@ -2828,6 +3700,454 @@ class PolicyAwareController:
             reason="defrost_set",
         )
 
+    def _next_route_energy_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        charging = state.route_energy
+
+        if charging.completed:
+            _remember_route_energy_selection(state, charging)
+            message = _format_route_energy_completion(charging)
+            state.route_energy = RouteEnergyFlow()
+            return NextAction.respond(message, reason="route_energy_done")
+
+        if charging.failure_message:
+            message = charging.failure_message
+            state.route_energy = RouteEnergyFlow()
+            return NextAction.respond(message, reason="route_energy_failed")
+
+        if charging.route_choice_requested and charging.route_detail_requested:
+            charging.route_detail_requested = False
+            return NextAction.respond(
+                _format_route_alternative_detail_prompt(charging.routes),
+                reason="route_energy_route_alternative_details",
+            )
+
+        if charging.needs_current_navigation and not charging.current_navigation_checked:
+            if not tool_index.has("get_current_navigation_state"):
+                return NextAction.respond(
+                    "I need the current navigation state before I can check charging needs along the route.",
+                    reason="route_energy_missing_current_navigation_tool",
+                )
+            return NextAction.tool_call(
+                "get_current_navigation_state",
+                {"detailed_information": True},
+                reason="route_energy_current_navigation_check",
+            )
+
+        if charging.destination_id is None and charging.destination_name is not None:
+            if not tool_index.has("get_location_id_by_location_name"):
+                return NextAction.respond(
+                    "I can't look up that destination because location search is unavailable right now.",
+                    reason="route_energy_missing_location_tool",
+                )
+            return NextAction.tool_call(
+                "get_location_id_by_location_name",
+                {"location": charging.destination_name},
+                reason="route_energy_destination_lookup",
+            )
+
+        if charging.wants_navigation_setup:
+            setup_action = self._next_route_energy_navigation_setup_action(
+                charging, state, tool_index
+            )
+            if setup_action is not None:
+                return setup_action
+
+        if (
+            charging.destination_id is not None
+            and charging.route_id is None
+            and (charging.wants_current_range or charging.wants_battery_sufficiency)
+        ):
+            route_action = self._prepare_route_energy_route(charging, state, tool_index)
+            if route_action is not None:
+                return route_action
+
+        if charging.needs_charging_status and not charging.charging_status_checked:
+            if not tool_index.has("get_charging_specs_and_status"):
+                return NextAction.respond(
+                    "I can't check the vehicle charging status because that information is unavailable right now.",
+                    reason="route_energy_missing_charging_status_tool",
+                )
+            return NextAction.tool_call(
+                "get_charging_specs_and_status",
+                reason="route_energy_charging_status",
+            )
+
+        if charging.wants_stop_count and (
+            charging.wants_charger_search or charging.destination_id is not None
+        ):
+            route_action = self._prepare_route_energy_route(charging, state, tool_index)
+            if route_action is not None:
+                return route_action
+
+        if charging.wants_range and not charging.distance_checked:
+            if charging.initial_soc is None and charging.state_of_charge is not None:
+                charging.initial_soc = charging.state_of_charge
+            if charging.initial_soc is None or charging.final_soc is None:
+                return NextAction.respond(
+                    "What battery percentage range should I calculate?",
+                    reason="route_energy_missing_soc_range",
+                )
+            if not tool_index.has("get_distance_by_soc"):
+                return NextAction.respond(
+                    "I can't calculate battery range because that range calculation tool is unavailable right now.",
+                    reason="route_energy_missing_distance_tool",
+                )
+            return NextAction.tool_call(
+                "get_distance_by_soc",
+                {
+                    "initial_state_of_charge": _json_number(charging.initial_soc),
+                    "final_state_of_charge": _json_number(charging.final_soc),
+                },
+                reason="route_energy_distance_by_soc",
+            )
+
+        if charging.wants_charger_search or charging.destination_id is not None:
+            route_action = self._prepare_route_energy_route(charging, state, tool_index)
+            if route_action is not None:
+                return route_action
+
+        if charging.wants_charger_search and not charging.pois_checked:
+            if charging.search_mode == "nearby":
+                if state.runtime.location_id is None:
+                    return NextAction.respond(
+                        "I need the current location before I can search for charging stations nearby.",
+                        reason="route_energy_missing_current_location",
+                    )
+                if not tool_index.has("search_poi_at_location"):
+                    return NextAction.respond(
+                        "I can't search for charging stations because place search is unavailable right now.",
+                        reason="route_energy_missing_nearby_poi_tool",
+                    )
+                arguments: dict[str, Any] = {
+                    "category_poi": "charging_stations",
+                    "location_id": state.runtime.location_id,
+                }
+                if charging.filters and _tool_argument_available(
+                    tool_index, "search_poi_at_location", "filters"
+                ):
+                    arguments["filters"] = charging.filters
+                return NextAction.tool_call(
+                    "search_poi_at_location",
+                    arguments,
+                    reason="route_energy_nearby_charger_search",
+                )
+
+            if charging.route_id is None:
+                if not charging.current_navigation_checked and tool_index.has(
+                    "get_current_navigation_state"
+                ):
+                    charging.needs_current_navigation = True
+                    return NextAction.tool_call(
+                        "get_current_navigation_state",
+                        {"detailed_information": True},
+                        reason="route_energy_current_navigation_for_route",
+                    )
+                return NextAction.respond(
+                    "I need a route before I can search for charging stations along it.",
+                    reason="route_energy_missing_route_id",
+                )
+
+            if charging.at_kilometer is None:
+                return NextAction.respond(
+                    "At about what distance along the route should I search for charging stations?",
+                    reason="route_energy_missing_route_position",
+                )
+
+            if not tool_index.has("search_poi_along_the_route"):
+                return NextAction.respond(
+                    "I can't search for charging stations along the route because that search capability is unavailable right now.",
+                    reason="route_energy_missing_along_route_poi_tool",
+                )
+            arguments = {
+                "category_poi": "charging_stations",
+                "route_id": charging.route_id,
+                "at_kilometer": _json_number(charging.at_kilometer),
+            }
+            if charging.filters and _tool_argument_available(
+                tool_index, "search_poi_along_the_route", "filters"
+            ):
+                arguments["filters"] = charging.filters
+            return NextAction.tool_call(
+                "search_poi_along_the_route",
+                arguments,
+                reason="route_energy_along_route_charger_search",
+            )
+
+        if charging.wants_charging_time and not charging.charging_time_checked:
+            if charging.selected_poi_id is None or charging.selected_plug_id is None:
+                selected = _select_route_energy_charging_option(charging)
+                if selected is None:
+                    return NextAction.respond(
+                        "Which charging station should I use for the charging time calculation?",
+                        reason="route_energy_missing_charging_station_choice",
+                    )
+                _record_route_energy_selected_poi(charging, selected)
+
+            if charging.target_soc is None:
+                return NextAction.respond(
+                    "What target battery percentage should I calculate charging time for?",
+                    reason="route_energy_missing_target_soc",
+                )
+
+            if (
+                not charging.charging_status_checked
+                and tool_index.has("get_charging_specs_and_status")
+            ):
+                charging.needs_charging_status = True
+                return NextAction.tool_call(
+                    "get_charging_specs_and_status",
+                    reason="route_energy_charging_status_for_time",
+                )
+
+            if charging.start_soc_for_charging is None:
+                charging.start_soc_for_charging = _route_energy_start_soc(charging)
+            if charging.start_soc_for_charging is None:
+                if not charging.charging_status_checked and tool_index.has(
+                    "get_charging_specs_and_status"
+                ):
+                    charging.needs_charging_status = True
+                    return NextAction.tool_call(
+                        "get_charging_specs_and_status",
+                        reason="route_energy_charging_status_for_time",
+                    )
+                return NextAction.respond(
+                    "I need the starting battery percentage before I can calculate charging time.",
+                    reason="route_energy_missing_start_soc",
+                )
+
+            if not tool_index.has("calculate_charging_time_by_soc"):
+                return NextAction.respond(
+                    "I can't calculate charging time because that calculation tool is unavailable right now.",
+                    reason="route_energy_missing_charging_time_tool",
+                )
+            return NextAction.tool_call(
+                "calculate_charging_time_by_soc",
+                {
+                    "charging_station_id": charging.selected_poi_id,
+                    "charging_station_plug_id": charging.selected_plug_id,
+                    "start_state_of_charge": _json_number(
+                        charging.start_soc_for_charging
+                    ),
+                    "target_state_of_charge": _json_number(charging.target_soc),
+                },
+                reason="route_energy_charging_time",
+            )
+
+        if charging.wants_call and not charging.call_completed:
+            if charging.selected_phone_number is None:
+                selected = _select_route_energy_charging_option(charging)
+                if selected is not None:
+                    _record_route_energy_selected_poi(charging, selected)
+            if charging.selected_phone_number is None:
+                return NextAction.respond(
+                    "I can't call the charging station because I don't have a phone number for it.",
+                    reason="route_energy_missing_phone_number",
+                )
+            if not tool_index.has("call_phone_by_number"):
+                return NextAction.respond(
+                    "I can't call the charging station because phone calling is unavailable right now.",
+                    reason="route_energy_missing_phone_tool",
+                )
+            return NextAction.tool_call(
+                "call_phone_by_number",
+                {"phone_number": charging.selected_phone_number},
+                reason="route_energy_call_charging_station",
+            )
+
+        charging.completed = True
+        return self._next_route_energy_action(state, tool_index)
+
+    def _next_route_energy_navigation_setup_action(
+        self,
+        charging: RouteEnergyFlow,
+        state: ControllerState,
+        tool_index: ToolIndex,
+    ) -> NextAction | None:
+        if charging.destination_id is None:
+            return NextAction.respond(
+                "Which destination should I use for the navigation?",
+                reason="route_energy_navigation_missing_destination",
+            )
+
+        if charging.selected_poi_id is None:
+            selected = _select_route_energy_charging_option(charging)
+            if selected is not None:
+                _record_route_energy_selected_poi(charging, selected)
+        if charging.selected_poi_id is None:
+            return NextAction.respond(
+                "Which charging station should I add as the stop?",
+                reason="route_energy_navigation_missing_charging_stop",
+            )
+
+        start_id = state.runtime.location_id
+        if start_id is None:
+            return NextAction.respond(
+                "I need the current location before I can set up that navigation.",
+                reason="route_energy_navigation_missing_start",
+            )
+
+        if not charging.setup_to_poi_checked:
+            if not tool_index.has("get_routes_from_start_to_destination"):
+                return NextAction.respond(
+                    "I can't find the route to the charging station because route search is unavailable right now.",
+                    reason="route_energy_navigation_missing_route_tool",
+                )
+            charging.route_lookup = "setup_to_poi"
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": start_id,
+                    "destination_id": charging.selected_poi_id,
+                },
+                reason="route_energy_navigation_route_to_stop",
+            )
+
+        if not charging.setup_from_poi_checked:
+            if not tool_index.has("get_routes_from_start_to_destination"):
+                return NextAction.respond(
+                    "I can't find the route from the charging station because route search is unavailable right now.",
+                    reason="route_energy_navigation_missing_route_tool",
+                )
+            charging.route_lookup = "setup_from_poi"
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": charging.selected_poi_id,
+                    "destination_id": charging.destination_id,
+                },
+                reason="route_energy_navigation_route_from_stop",
+            )
+
+        route_to_poi = _select_requested_route(
+            charging.routes_to_poi,
+            charging.station_route_preference or "fastest",
+            None,
+        )
+        if route_to_poi is None and charging.routes_to_poi:
+            route_to_poi = charging.routes_to_poi[0]
+
+        route_from_poi_index = (
+            _select_route_index_by_via(
+                charging.routes_from_poi, charging.final_route_via
+            )
+            if charging.final_route_via
+            else None
+        )
+        route_from_poi = _select_requested_route(
+            charging.routes_from_poi,
+            charging.route_preference,
+            (
+                route_from_poi_index
+                if route_from_poi_index is not None
+                else charging.selected_route_index
+            ),
+        )
+        if route_from_poi is None and len(charging.routes_from_poi) == 1:
+            route_from_poi = charging.routes_from_poi[0]
+
+        if route_to_poi is None or route_from_poi is None:
+            return NextAction.respond(
+                _format_route_choice_prompt(charging.routes_from_poi),
+                reason="route_energy_navigation_route_disambiguation",
+            )
+
+        route_to_poi_id = route_to_poi.get("route_id")
+        route_from_poi_id = route_from_poi.get("route_id")
+        if not isinstance(route_to_poi_id, str) or not isinstance(
+            route_from_poi_id, str
+        ):
+            return NextAction.respond(
+                "I can't safely set that navigation because a route ID is missing.",
+                reason="route_energy_navigation_missing_route_id",
+            )
+
+        if not tool_index.has("set_new_navigation"):
+            return NextAction.respond(
+                "I can't start navigation because that control is unavailable right now.",
+                reason="route_energy_navigation_missing_set_tool",
+            )
+
+        charging.completion_message = "Done, navigation is started with the charging stop."
+        return NextAction.tool_call(
+            "set_new_navigation",
+            {"route_ids": [route_to_poi_id, route_from_poi_id]},
+            reason="route_energy_navigation_set",
+        )
+
+    def _prepare_route_energy_route(
+        self,
+        charging: RouteEnergyFlow,
+        state: ControllerState,
+        tool_index: ToolIndex,
+    ) -> NextAction | None:
+        if charging.route_id is not None:
+            return None
+
+        _resolve_route_energy_route_id(charging)
+        if charging.route_id is not None:
+            return None
+
+        if charging.destination_id is None:
+            return None
+
+        if charging.route_start_id is None:
+            charging.route_start_id = _route_energy_start_id(state, charging)
+            if charging.route_start_id is None:
+                return NextAction.respond(
+                    "I need the current location before I can find a route.",
+                    reason="route_energy_missing_route_start",
+                )
+
+        if not charging.routes_checked:
+            if not tool_index.has("get_routes_from_start_to_destination"):
+                return NextAction.respond(
+                    "I can't find a route because route search is unavailable right now.",
+                    reason="route_energy_missing_route_tool",
+                )
+            charging.route_lookup = "destination"
+            return NextAction.tool_call(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": charging.route_start_id,
+                    "destination_id": charging.destination_id,
+                },
+                reason="route_energy_route_lookup",
+            )
+
+        selected_route = _select_requested_route(
+            charging.routes,
+            charging.route_preference,
+            charging.selected_route_index,
+        )
+        if (
+            selected_route is None
+            and charging.route_preference is None
+            and (charging.wants_charging_time or charging.wants_charger_search)
+        ):
+            selected_route = _select_route(charging.routes, "fastest")
+            if selected_route is not None:
+                charging.route_preference = "fastest"
+        if selected_route is None:
+            if len(charging.routes) == 1:
+                selected_route = charging.routes[0]
+            else:
+                charging.route_choice_requested = True
+                return NextAction.respond(
+                    _format_route_choice_prompt(charging.routes),
+                    reason="route_energy_route_disambiguation",
+                )
+
+        route_id = selected_route.get("route_id")
+        if not isinstance(route_id, str) or not route_id:
+            return NextAction.respond(
+                "I can't use that route because the route ID is missing.",
+                reason="route_energy_missing_selected_route_id",
+            )
+        charging.route_id = route_id
+        return None
+
     def _next_poi_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -2952,6 +4272,7 @@ class PolicyAwareController:
                 "the navigation destination is updated",
                 selected_route,
                 poi.route_preference,
+                poi.routes,
             )
             return NextAction.tool_call(
                 "navigation_replace_final_destination",
@@ -2984,6 +4305,15 @@ class PolicyAwareController:
             return NextAction.respond(
                 navigation.failure_message,
                 reason="navigation_failed",
+            )
+
+        if navigation.route_choice_requested and navigation.route_detail_requested:
+            navigation.route_detail_requested = False
+            return NextAction.respond(
+                _format_route_alternative_detail_prompt(
+                    _navigation_choice_routes(navigation)
+                ),
+                reason="navigation_route_alternative_details",
             )
 
         if navigation.mode == "delete_waypoint":
@@ -3021,7 +4351,7 @@ class PolicyAwareController:
         ):
             if not tool_index.has("get_current_navigation_state"):
                 return NextAction.respond(
-                    "I need the current navigation state before I can safely edit this route.",
+                    "I can't check the current navigation state because that lookup is unavailable right now, so I can't safely edit this route.",
                     reason="navigation_missing_current_state_tool",
                 )
             return NextAction.tool_call(
@@ -3086,6 +4416,7 @@ class PolicyAwareController:
                 "the navigation destination is updated",
                 selected_route,
                 navigation.route_preference,
+                navigation.routes,
             )
             return NextAction.tool_call(
                 "navigation_replace_final_destination",
@@ -3105,6 +4436,7 @@ class PolicyAwareController:
             "navigation is started",
             selected_route,
             navigation.route_preference,
+            navigation.routes,
         )
         return NextAction.tool_call(
             "set_new_navigation",
@@ -3174,7 +4506,7 @@ class PolicyAwareController:
         if not navigation.current_navigation_checked:
             if not tool_index.has("get_current_navigation_state"):
                 return NextAction.respond(
-                    "I need the current navigation state before I can safely edit this route.",
+                    "I can't check the current navigation state because that lookup is unavailable right now, so I can't safely edit this route.",
                     reason="navigation_missing_current_state_tool",
                 )
             return NextAction.tool_call(
@@ -3203,6 +4535,16 @@ class PolicyAwareController:
 
         adjacent = _navigation_adjacent_waypoints(navigation, navigation.waypoint_id)
         if adjacent is None:
+            if (
+                navigation.waypoints_id
+                and navigation.waypoint_id == navigation.waypoints_id[-1]
+            ):
+                navigation.mode = "delete_final_destination"
+                navigation.destination_id = navigation.waypoint_id
+                navigation.destination_name = navigation.waypoint_name
+                return self._next_navigation_delete_destination_action(
+                    navigation, tool_index
+                )
             return NextAction.respond(
                 "I can only remove an intermediate waypoint from the current route.",
                 reason="navigation_waypoint_not_intermediate",
@@ -3256,6 +4598,7 @@ class PolicyAwareController:
             "the waypoint is removed from the navigation route",
             selected_route,
             navigation.route_preference,
+            navigation.routes_without_waypoint,
         )
         return NextAction.tool_call(
             "navigation_delete_waypoint",
@@ -3410,6 +4753,10 @@ class PolicyAwareController:
             "the waypoint is replaced in the navigation route",
             [route_to_new_waypoint, route_from_new_waypoint],
             navigation.route_preference,
+            [
+                *navigation.routes_to_new_waypoint,
+                *navigation.routes_from_new_waypoint,
+            ],
         )
         return NextAction.tool_call(
             "navigation_replace_one_waypoint",
@@ -3508,6 +4855,139 @@ def _is_late_email_request(text: str) -> bool:
     return bool(re.search(r"\b(send|write|email)\b", text))
 
 
+def _is_meeting_attendees_email_request(text: str) -> bool:
+    if "email" not in text or "meeting" not in text:
+        return False
+    if not re.search(r"\b(send|write|email)\b", text):
+        return False
+    return any(
+        word in text
+        for word in (
+            "attendee",
+            "attendees",
+            "participant",
+            "participants",
+            "everyone",
+            "all",
+        )
+    )
+
+
+def _is_email_composition_request(text: str) -> bool:
+    if "email" not in text:
+        return False
+    return bool(re.search(r"\b(send|write|draft|compose|message)\b", text))
+
+
+def _new_meeting_attendees_email_flow(
+    text: str, state: ControllerState
+) -> EmailFlow:
+    return EmailFlow(
+        active=True,
+        mode="meeting_attendees",
+        meeting_topic=_extract_meeting_topic_for_attendees_email(text),
+        calendar_checked=bool(state.recent_calendar_meetings),
+        content_message=_extract_meeting_attendees_email_content(text, state),
+    )
+
+
+def _extract_meeting_topic_for_attendees_email(text: str) -> str | None:
+    quoted = _extract_quoted_meeting_topic(text)
+    if quoted:
+        return quoted
+
+    patterns = (
+        r"\b(?:attendees|participants)\s+of\s+(?:my\s+|the\s+)?(.+?)\s+meeting\b",
+        r"\b(?:my\s+|the\s+)?(.+?)\s+meeting\s+(?:attendees|participants)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        topic = _clean_meeting_topic(match.group(1))
+        if topic:
+            return topic
+    return None
+
+
+def _clean_meeting_topic(value: str) -> str | None:
+    value = re.sub(
+        r"^\s*(?:at\s+)?\d{1,2}:\d{2}\s*(?:am|pm)?\s+",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.split(
+        r"\b(?:today|tomorrow|please|with|about|at|in|on|for|and|to|from)\b",
+        value,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    value = " ".join(value.strip(" .?!;:-'\"").split())
+    if not value:
+        return None
+    if value.casefold() in {"my", "the", "a", "an"}:
+        return None
+    return value
+
+
+def _extract_meeting_attendees_email_content(
+    text: str, state: ControllerState
+) -> str | None:
+    lowered = text.lower()
+    if not any(
+        marker in lowered
+        for marker in ("delay", "late", "charging stop", "detour", "charging station")
+    ):
+        return None
+
+    station_name, detour_minutes = _recent_charging_stop_email_context(text, state)
+    if station_name is None and "charging" not in lowered:
+        return None
+
+    topic = _extract_meeting_topic_for_attendees_email(text) or "the meeting"
+    stop_text = (
+        f"a charging stop at {station_name}"
+        if station_name
+        else "a charging stop"
+    )
+    delay_text = (
+        f"which will add about {detour_minutes} minutes to my journey due to the detour"
+        if detour_minutes is not None
+        else "which may add a slight delay due to the detour"
+    )
+    return (
+        "Dear team,\n\n"
+        f"I wanted to let you know that I need to make {stop_text}, {delay_text}. "
+        f"I may be slightly delayed for the {topic} meeting.\n\n"
+        "Best regards"
+    )
+
+
+def _recent_charging_stop_email_context(
+    text: str, state: ControllerState
+) -> tuple[str | None, int | None]:
+    if not state.recent_charging_pois:
+        return None, None
+    selected = _select_poi_from_text(state.recent_charging_pois, text)
+    if selected is None:
+        selected = state.recent_charging_pois[0]
+    name = selected.get("name")
+    station_name = name if isinstance(name, str) and name else None
+    return station_name, _extract_poi_detour_minutes(selected)
+
+
+def _extract_poi_detour_minutes(poi: dict[str, Any]) -> int | None:
+    raw_time = poi.get("detour_from_route_time")
+    if isinstance(raw_time, dict):
+        hours = _safe_int(raw_time.get("hour"), 0) or 0
+        minutes = _safe_int(raw_time.get("minutes"), 0) or 0
+        total = hours * 60 + minutes
+        if total > 0:
+            return total
+    return None
+
+
 def _is_contact_share_email_start(text: str) -> bool:
     if "email" not in text:
         return False
@@ -3517,6 +4997,29 @@ def _is_contact_share_email_start(text: str) -> bool:
         re.search(r"\blook up\b", text)
         or re.search(r"\bfind\b", text)
         or re.search(r"\bsend\b", text)
+    )
+
+
+def _is_contact_lookup_or_call_request(text: str) -> bool:
+    if any(
+        phrase in text
+        for phrase in (
+            "contact info",
+            "contact information",
+            "contact details",
+            "phone number",
+            "call contact",
+        )
+    ):
+        return True
+    if re.search(r"\b(?:call|phone)\s+[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*)?\b", text):
+        return True
+    return bool(
+        re.fullmatch(
+            r"\s*(?:find|look up|lookup|search for)\s+"
+            r"[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*)?\.?\s*",
+            text,
+        )
     )
 
 
@@ -3730,6 +5233,10 @@ def _record_email_contact_information(email: EmailFlow, result: Any) -> None:
             email.subject_name = _contact_info_name(info) or email.subject_name
             if email.subject_name:
                 _set_email_flow_name(email, "subject", email.subject_name)
+        if contact_id in email.attendee_contact_ids:
+            attendee_email = _extract_email_from_contact_info(info)
+            if attendee_email:
+                email.attendee_emails_by_id[contact_id] = attendee_email
 
 
 def _extract_email_from_contact_info(info: dict[str, Any]) -> str | None:
@@ -3764,6 +5271,12 @@ def _email_missing_contact_info_ids(email: EmailFlow) -> list[str]:
         and (email.subject_email is None or email.subject_phone is None)
     ):
         ids.append(email.subject_contact_id)
+    if email.mode == "meeting_attendees":
+        ids.extend(
+            contact_id
+            for contact_id in email.attendee_contact_ids
+            if contact_id not in email.attendee_emails_by_id
+        )
     return ids
 
 
@@ -3819,8 +5332,9 @@ def _format_email_confirmation(email: EmailFlow, extra_recipients: list[str]) ->
     addresses = _email_recipient_addresses(email, extra_recipients)
     address_list = ", ".join(addresses)
     return (
-        f"I will send this email to {address_list}:\n\n"
-        f"{email.content_message}\n\n"
+        "Please confirm these email details before I send it.\n"
+        f"Recipients: {address_list}\n"
+        f"Content: {email.content_message}\n\n"
         "Please confirm if I should send it."
     )
 
@@ -3829,6 +5343,8 @@ def _email_recipient_addresses(
     email: EmailFlow, extra_recipients: list[str]
 ) -> list[str]:
     addresses = []
+    if email.mode == "meeting_attendees":
+        addresses.extend(_email_attendee_addresses(email))
     if email.recipient_email:
         addresses.append(email.recipient_email)
     if email.mode == "meeting_delay":
@@ -3836,6 +5352,101 @@ def _email_recipient_addresses(
             if extra not in addresses:
                 addresses.append(extra)
     return addresses
+
+
+def _email_attendee_addresses(email: EmailFlow) -> list[str]:
+    addresses: list[str] = []
+    for contact_id in email.attendee_contact_ids:
+        address = email.attendee_emails_by_id.get(contact_id)
+        if address and address not in addresses:
+            addresses.append(address)
+    return addresses
+
+
+def _record_email_attendee_meeting(
+    state: ControllerState, meeting: dict[str, Any]
+) -> None:
+    email = state.email
+    topic = meeting.get("topic")
+    if isinstance(topic, str):
+        email.meeting_topic = topic
+        state.recent_meeting_topic = topic
+
+    start = meeting.get("start")
+    if isinstance(start, dict):
+        email.meeting_start_hour = _safe_int(start.get("hour"))
+        email.meeting_start_minute = _safe_int(start.get("minute"), 0)
+
+    attendees = meeting.get("attendees")
+    if isinstance(attendees, list):
+        email.attendee_contact_ids = [
+            attendee for attendee in attendees if isinstance(attendee, str)
+        ]
+
+
+def _select_meeting_from_text(
+    meetings: list[dict[str, Any]], text: str
+) -> dict[str, Any] | None:
+    normalized_text = _normalized_text(text)
+    candidates: list[dict[str, Any]] = []
+    for meeting in meetings:
+        topic = meeting.get("topic")
+        if not isinstance(topic, str):
+            continue
+        normalized_topic = _normalized_text(topic)
+        if normalized_topic and normalized_topic in normalized_text:
+            candidates.append(meeting)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _format_meeting_choice_prompt(meetings: list[dict[str, Any]]) -> str:
+    options = []
+    for index, meeting in enumerate(meetings[:4], start=1):
+        topic = meeting.get("topic")
+        if not isinstance(topic, str) or not topic.strip():
+            topic = f"Meeting {index}"
+        start = meeting.get("start")
+        time_text = ""
+        if isinstance(start, dict):
+            hour = _safe_int(start.get("hour"))
+            minute = _safe_int(start.get("minute"), 0)
+            if hour is not None:
+                time_text = f" at {_format_clock_time(hour, minute)}"
+        options.append(f"{index}. {topic}{time_text}")
+    if not options:
+        return "Which meeting should I use?"
+    return f"Which meeting should I use? {'; '.join(options)}"
+
+
+def _normalize_email_content(text: str) -> str:
+    content = text.strip()
+    content = re.sub(
+        r"^(?:it should be|say|send|write|please send|please write)\s+",
+        "",
+        content,
+        flags=re.IGNORECASE,
+    )
+    content = content.strip(" .")
+
+    def replace_time(match: re.Match[str]) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2) or "00")
+        suffix = match.group(3).lower()
+        if suffix == "pm" and hour != 12:
+            hour += 12
+        if suffix == "am" and hour == 12:
+            hour = 0
+        return f"{hour:02d}:{minute:02d}"
+
+    content = re.sub(
+        r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
+        replace_time,
+        content,
+        flags=re.IGNORECASE,
+    )
+    if content:
+        return content[0].upper() + content[1:]
+    return text.strip()
 
 
 def _format_contact_choice_prompt(matches: dict[str, str]) -> str:
@@ -3873,9 +5484,12 @@ def _contains_new_action_intent(text: str) -> bool:
         re.search(
             r"\b(open|close|shut|turn|switch|set|change|replace|update|adjust|"
             r"activate|deactivate|navigate|drive|route|find|search|look for|"
-            r"delete|remove|cancel|send|email|match)\b",
+            r"delete|remove|cancel|send|email|match|check|call)\b",
             stripped,
         )
+        or "battery" in stripped
+        or "range" in stripped
+        or "charging station" in stripped
         or "what about" in stripped
     )
 
@@ -4067,6 +5681,20 @@ def _is_fan_speed_request(text: str) -> bool:
     )
 
 
+def _is_current_fan_speed_query(text: str) -> bool:
+    if not re.search(r"\bfan\b", text) or "speed" not in text:
+        return False
+    if _extract_level(text) is not None or _is_light_off_request(text):
+        return False
+    return bool(
+        "current" in text
+        or "look up" in text
+        or "check" in text
+        or "what about" in text
+        or re.search(r"\bwhat(?:'s| is)?\b", text)
+    )
+
+
 def _is_steering_wheel_heating_request(text: str) -> bool:
     if "steering wheel" not in text:
         return False
@@ -4204,6 +5832,118 @@ def _is_air_conditioning_off_request(text: str) -> bool:
         or re.search(r"\b(?:air conditioning|ac) off\b", text)
         or re.search(r"\bturn (?:the )?(?:air conditioning|ac) off\b", text)
         or re.search(r"\bswitch (?:the )?(?:air conditioning|ac) off\b", text)
+    )
+
+
+def _mentions_temperature_setting(text: str) -> bool:
+    return bool(
+        "temperature" in text
+        or "temperatures" in text
+        or re.search(r"\b\d+(?:\.\d+)?\s*(?:degree|degrees|celsius|c)\b", text)
+    )
+
+
+def _extract_temperature_setting(text: str) -> float | None:
+    degree_match = re.search(
+        r"\b([1-3]?\d(?:\.\d+)?)\s*(?:degree|degrees|celsius|c)\b",
+        text,
+    )
+    if degree_match:
+        return float(degree_match.group(1))
+
+    temperature_match = re.search(
+        r"\b(?:temperature|temp)[^.?!,;]*?\b([1-3]?\d(?:\.\d+)?)\b",
+        text,
+    )
+    if temperature_match:
+        return float(temperature_match.group(1))
+
+    return None
+
+
+def _mentions_seat_heating(text: str) -> bool:
+    return bool(
+        "seat heating" in text
+        or "heated seat" in text
+        or "heated seats" in text
+        or "seat heater" in text
+        or "seat heaters" in text
+    )
+
+
+def _is_occupancy_comfort_request(text: str) -> bool:
+    if not any(word in text for word in ("warm", "heat", "cold", "chilly")):
+        return False
+    if not any(
+        phrase in text
+        for phrase in (
+            "occupied seat",
+            "occupied seats",
+            "seats that are occupied",
+            "seats currently occupied",
+            "currently occupied seats",
+            "seat zones that are currently occupied",
+            "seat zones currently occupied",
+            "unoccupied seat",
+            "unoccupied seats",
+            "empty seat",
+            "empty seats",
+        )
+    ):
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "warm up",
+            "heat up",
+            "efficient",
+            "comfort",
+            "seat heating",
+            "heated seats",
+        )
+    )
+
+
+def _is_driver_comfort_temperature_request(text: str) -> bool:
+    if not (
+        "driver zone temperature" in text
+        or "driver temperature" in text
+        or "driver's temperature" in text
+    ):
+        return False
+    if "comfort" in text:
+        return True
+    if re.search(r"\bby\s+[1-3]?\d(?:\.\d+)?\s*(?:degree|degrees|celsius|c)\b", text):
+        return False
+    return _extract_temperature_setting(text) is not None
+
+
+def _requests_passenger_heating_off(text: str) -> bool:
+    return bool(
+        _mentions_seat_heating(text)
+        and "passenger" in text
+        and _is_light_off_request(text)
+    )
+
+
+def _is_climate_inspection_request(text: str) -> bool:
+    if not (_mentions_temperature_setting(text) or _mentions_seat_heating(text)):
+        return False
+    return any(
+        phrase in text
+        for phrase in (
+            "current climate",
+            "current temperature",
+            "current temperatures",
+            "current seat heating",
+            "climate settings",
+            "seat heating levels",
+            "heating levels",
+            "tell me what",
+            "check the current",
+            "what are the current",
+            "what the current",
+        )
     )
 
 
@@ -4427,6 +6167,39 @@ def _extract_navigation_destination_to_delete(text: str) -> str | None:
     return None
 
 
+def _new_navigation_delete_destination_flow(
+    text: str, state: ControllerState
+) -> NavigationFlow:
+    previous_navigation = state.navigation
+    destination_name = _extract_navigation_destination_to_delete(text)
+    destination_id = _matching_recent_location_id(
+        destination_name,
+        previous_navigation.destination_name,
+        previous_navigation.destination_id,
+    ) or _matching_recent_location_id(
+        destination_name,
+        state.recent_location_lookup_name,
+        state.recent_location_lookup_id,
+    )
+    return NavigationFlow(
+        active=True,
+        mode="delete_final_destination",
+        destination_name=destination_name,
+        destination_id=destination_id,
+        needs_current_navigation=destination_id is None,
+    )
+
+
+def _new_navigation_delete_waypoint_flow(text: str) -> NavigationFlow:
+    return NavigationFlow(
+        active=True,
+        mode="delete_waypoint",
+        waypoint_name=_extract_navigation_waypoint_to_delete(text),
+        route_preference=_extract_route_preference(text.lower()),
+        needs_current_navigation=True,
+    )
+
+
 def _is_complex_navigation_request(text: str) -> bool:
     complex_markers = (
         "charging station",
@@ -4454,6 +6227,883 @@ def _is_complex_navigation_request(text: str) -> bool:
         "stops at",
     )
     return any(marker in text for marker in complex_markers)
+
+
+def _is_route_energy_request(text: str) -> bool:
+    has_energy_term = any(
+        term in text
+        for term in (
+            "battery",
+            "range",
+            "state of charge",
+            "soc",
+            "charge",
+            "charging",
+            "charger",
+        )
+    )
+    if not has_energy_term:
+        return False
+
+    if (
+        ("calendar" in text or "meeting" in text)
+        and "charging station" not in text
+        and "charger" not in text
+    ):
+        return False
+
+    if (
+        "charging station stop" in text
+        and re.search(r"\b(set up|start)\s+navigation\b", text)
+        and not any(term in text for term in ("battery", "range", "along", "around"))
+    ):
+        return False
+
+    return bool(
+        "battery" in text
+        or "range" in text
+        or "state of charge" in text
+        or "soc" in text
+        or "how far" in text
+        or "how long" in text
+        or "charging time" in text
+        or "charging stop" in text
+        or "charging station" in text
+        or "charger" in text
+    )
+
+
+def _is_recent_charging_stop_navigation_request(
+    text: str, state: ControllerState
+) -> bool:
+    station_name = state.recent_selected_charging_poi_name
+    if not station_name:
+        return False
+    return bool(
+        "navigation" in text
+        and "then to" in text
+        and _normalized_text(station_name) in _normalized_text(text)
+    )
+
+
+def _new_route_energy_flow(text: str) -> RouteEnergyFlow:
+    flow = RouteEnergyFlow(active=True)
+    _update_route_energy_from_text(flow, text)
+    return flow
+
+
+def _hydrate_route_energy_from_recent(
+    flow: RouteEnergyFlow, state: ControllerState
+) -> None:
+    if (
+        not flow.wants_charging_time
+        and not flow.wants_call
+        and not flow.wants_navigation_setup
+    ):
+        return
+    if not state.recent_charging_pois:
+        return
+    if not _recent_charging_context_matches(flow, state):
+        return
+    flow.pois = list(state.recent_charging_pois)
+    flow.pois_checked = True
+    if flow.route_id is None:
+        flow.route_id = state.recent_charging_route_id
+    if flow.at_kilometer is None:
+        flow.at_kilometer = state.recent_charging_at_kilometer
+    if flow.search_mode is None and flow.route_id is not None:
+        flow.search_mode = "along_route"
+    if state.recent_selected_charging_poi_id is not None:
+        flow.selected_poi_id = state.recent_selected_charging_poi_id
+        flow.selected_poi_name = state.recent_selected_charging_poi_name
+        flow.selected_plug_id = state.recent_selected_charging_plug_id
+        flow.selected_phone_number = state.recent_selected_charging_phone_number
+        selected = _select_route_energy_charging_option(flow)
+        if selected is not None:
+            _record_route_energy_selected_poi(flow, selected)
+
+
+def _remember_route_energy_selection(
+    state: ControllerState, flow: RouteEnergyFlow
+) -> None:
+    if flow.selected_poi_id is None:
+        return
+    state.recent_selected_charging_poi_id = flow.selected_poi_id
+    state.recent_selected_charging_poi_name = flow.selected_poi_name
+    state.recent_selected_charging_plug_id = flow.selected_plug_id
+    state.recent_selected_charging_phone_number = flow.selected_phone_number
+
+
+def _recent_charging_context_matches(
+    flow: RouteEnergyFlow, state: ControllerState
+) -> bool:
+    if not flow.wants_charger_search:
+        return True
+    if flow.search_mode == "along_route":
+        if state.recent_charging_route_id is None:
+            return False
+        if (
+            flow.at_kilometer is not None
+            and state.recent_charging_at_kilometer is not None
+            and abs(flow.at_kilometer - state.recent_charging_at_kilometer) > 5
+        ):
+            return False
+    if flow.search_mode == "nearby" and state.recent_charging_route_id is not None:
+        return False
+    return True
+
+
+def _update_route_energy_from_text(flow: RouteEnergyFlow, text: str) -> None:
+    lowered = text.lower()
+    mentions_current_navigation = _route_energy_mentions_current_navigation(lowered)
+
+    destination = _extract_route_energy_destination(text)
+    if (
+        destination is not None
+        and flow.destination_name is None
+        and not mentions_current_navigation
+    ):
+        flow.destination_name = destination
+        flow.route_selection = "planned_route"
+
+    route_preference = _extract_route_preference(lowered)
+    if route_preference is not None:
+        flow.route_preference = route_preference
+
+    station_route_preference = _extract_station_route_preference(lowered)
+    if station_route_preference is not None:
+        flow.station_route_preference = station_route_preference
+
+    route_index = _extract_route_choice_index(lowered)
+    if route_index is not None:
+        flow.selected_route_index = route_index
+
+    route_via = _extract_route_via(lowered)
+    if route_via is not None:
+        flow.final_route_via = route_via
+
+    if mentions_current_navigation:
+        flow.needs_current_navigation = True
+
+    if _is_route_energy_navigation_setup_request(lowered):
+        flow.wants_navigation_setup = True
+        flow.search_mode = None
+
+    if "final destination" in lowered or "longer journey" in lowered:
+        flow.route_selection = "last_segment"
+
+    if any(term in lowered for term in ("calculate the range", "calculate range")):
+        flow.wants_range = True
+    elif "driving distance" in lowered:
+        flow.wants_range = True
+    elif "how far" in lowered and any(
+        marker in lowered
+        for marker in ("%", "percent", "down to", "until empty", "state of charge")
+    ):
+        flow.wants_range = True
+
+    if _is_charge_stop_count_request(lowered):
+        flow.wants_stop_count = True
+        flow.wants_range = True
+        if flow.route_preference is None and "fastest" in lowered:
+            flow.route_preference = "fastest"
+
+    distance_range = _extract_soc_distance_range(lowered)
+    if distance_range is not None:
+        flow.initial_soc, flow.final_soc = distance_range
+        if flow.wants_stop_count or flow.wants_range:
+            flow.wants_range = True
+
+    safety_buffer = _extract_safety_buffer_soc(lowered)
+    if safety_buffer is not None:
+        flow.final_soc = safety_buffer
+        if "range" in lowered or "battery" in lowered:
+            flow.wants_range = True
+
+    if "until empty" in lowered and flow.initial_soc is not None:
+        flow.final_soc = 0
+        flow.wants_range = True
+
+    target_soc = _extract_charging_target_soc(lowered)
+    if target_soc is not None:
+        flow.target_soc = target_soc
+        if not flow.wants_stop_count:
+            flow.wants_charging_time = "charge" in lowered or "charging" in lowered
+
+    start_soc = _extract_charging_start_soc(lowered)
+    if start_soc is not None:
+        flow.start_soc_for_charging = start_soc
+
+    at_kilometer = _extract_route_kilometer(lowered)
+    if at_kilometer is not None:
+        flow.at_kilometer = at_kilometer
+
+    filters = _extract_charging_filters(lowered)
+    for filter_name in filters:
+        if filter_name not in flow.filters:
+            flow.filters.append(filter_name)
+
+    if (
+        not flow.wants_navigation_setup
+        and not _is_named_charging_station_followup(lowered)
+        and ("charging station" in lowered or "charger" in lowered)
+    ):
+        flow.wants_charger_search = True
+        flow.search_mode = _route_energy_search_mode(lowered, flow)
+    elif flow.wants_stop_count and flow.destination_name is not None:
+        flow.search_mode = "along_route"
+
+    if "how long" in lowered and ("charge" in lowered or "charging" in lowered):
+        flow.wants_charging_time = True
+
+    if any(
+        term in lowered
+        for term in (
+            "current range",
+            "current charge",
+            "current battery",
+            "battery status",
+            "battery range",
+            "battery information",
+            "charging information",
+            "charging capabilities",
+            "remaining range",
+            "how much can it hold",
+            "how fast can it charge",
+            "how far can i go",
+            "battery level",
+            "enough battery",
+            "charging station needed",
+            "low battery",
+        )
+    ):
+        if any(
+            range_term in lowered
+            for range_term in (
+                "battery range",
+                "current range",
+                "remaining range",
+                "how far can i go",
+            )
+        ):
+            flow.wants_current_range = True
+        flow.needs_charging_status = True
+    if "enough battery" in lowered or re.search(
+        r"\b(?:battery|range)\b[^.?!]{0,40}\b(?:enough|sufficient)\b", lowered
+    ):
+        flow.wants_battery_sufficiency = True
+        flow.needs_charging_status = True
+
+    if flow.wants_charging_time and flow.start_soc_for_charging is None:
+        flow.needs_charging_status = True
+
+    if "phone number" in lowered or re.search(r"\bcall\b", lowered):
+        flow.wants_call = True
+
+
+def _extract_route_energy_destination(text: str) -> str | None:
+    destination = _extract_navigation_destination(text)
+    then_destination = _extract_then_destination(text)
+    if then_destination is not None:
+        return then_destination
+    if destination is not None:
+        return destination
+
+    location = _location_name_pattern()
+    patterns = (
+        rf"\b(?i:set up|start|create|plan)\b[^.?!]{{0,60}}\b(?i:navigation|route)\b[^.?!]{{0,40}}\b(?i:to)\s+{location}",
+        rf"\b(?i:trip|journey|route|drive|driving|travel|travelling|traveling|heading|head)\b"
+        rf"[^.?!]{{0,60}}\b(?i:to|toward|towards)\s+{location}",
+        rf"\b(?i:get|go|going|reach)\s+(?i:to)\s+{location}",
+        rf"\b(?i:on my way|on the way)\s+(?i:to)\s+{location}",
+        rf"\b(?i:for)\s+{location}\s*(?:[.?!]|$)",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        if not matches:
+            continue
+        value = matches[-1]
+        if isinstance(value, tuple):
+            value = value[-1]
+        destination = _clean_location_query(value)
+        if destination:
+            return destination
+    return None
+
+
+def _extract_then_destination(text: str) -> str | None:
+    location = _location_name_pattern()
+    match = re.search(rf"\b(?i:then)\s+(?i:to)\s+{location}", text)
+    if not match:
+        return None
+    value = match.group(1) if match.groups() else match.group(0)
+    return _clean_location_query(value)
+
+
+def _route_energy_mentions_current_navigation(text: str) -> bool:
+    return any(
+        phrase in text
+        for phrase in (
+            "current route",
+            "active navigation",
+            "my route",
+            "actual route",
+            "along the route",
+            "along my route",
+            "along the way",
+            "first destination",
+            "multi-stop",
+            "multistop",
+        )
+    )
+
+
+def _is_route_energy_navigation_setup_request(text: str) -> bool:
+    if re.search(
+        r"\b(?:do not|don't|dont|not)\b[^.?!]{0,40}\b(?:add|set up|start|create|plan)\b"
+        r"[^.?!]{0,80}\bnavigation\b",
+        text,
+    ):
+        return False
+    return bool(
+        re.search(r"\b(set up|start|create|add|plan)\b[^.?!]{0,80}\bnavigation\b", text)
+        and any(
+            phrase in text
+            for phrase in ("charging stop", "charging station", "charger")
+        )
+    )
+
+
+def _is_named_charging_station_followup(text: str) -> bool:
+    if any(
+        phrase in text
+        for phrase in (
+            "search for",
+            "find",
+            "look for",
+            "nearby",
+            "along the route",
+            "along my route",
+            "around",
+            "available right now",
+            "currently available",
+        )
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:at|for)\s+(?:the\s+)?[a-z0-9+&][a-z0-9+&\s'-]{1,60}"
+            r"\s+charging station\b",
+            text,
+        )
+    )
+
+
+def _extract_station_route_preference(
+    text: str,
+) -> Literal["fastest", "shortest"] | None:
+    if re.search(r"\bto\b[^.?!]{0,80}\bfastest route\b[^.?!]{0,80}\bthen to\b", text):
+        return "fastest"
+    if re.search(r"\bto\b[^.?!]{0,80}\bshortest route\b[^.?!]{0,80}\bthen to\b", text):
+        return "shortest"
+    if re.search(
+        r"\bfastest\b[^.?!]{0,80}\b(?:charging station|charging stop|charger)\b",
+        text,
+    ):
+        return "fastest"
+    if re.search(
+        r"\bshortest\b[^.?!]{0,80}\b(?:charging station|charging stop|charger)\b",
+        text,
+    ):
+        return "shortest"
+    return None
+
+
+def _extract_route_via(text: str) -> str | None:
+    match = re.search(r"\bvia\s+([a-z0-9,\s-]{2,60})(?:[.?!]|$)", text)
+    if not match:
+        return None
+    value = " ".join(match.group(1).strip(" ,.;").split())
+    return value or None
+
+
+def _route_energy_search_mode(
+    text: str, flow: RouteEnergyFlow
+) -> Literal["nearby", "along_route"]:
+    if flow.at_kilometer is not None:
+        if any(
+            phrase in text
+            for phrase in (
+                "from now",
+                "from my current location",
+                "from current location",
+                "into my journey",
+                "into the journey",
+                "along",
+                "first destination",
+                "my route",
+                "the route",
+            )
+        ):
+            return "along_route"
+        if flow.needs_current_navigation and flow.at_kilometer >= 20:
+            return "along_route"
+    if any(
+        phrase in text
+        for phrase in (
+            "nearby",
+            "near me",
+            "around here",
+            "current location",
+            "before i start",
+            "before starting",
+            "before the trip",
+        )
+    ):
+        return "nearby"
+    if any(phrase in text for phrase in ("along", "route", "on the way", "way to")):
+        return "along_route"
+    if flow.destination_name is not None:
+        return "along_route"
+    return "nearby"
+
+
+def _is_charge_stop_count_request(text: str) -> bool:
+    if not re.search(r"\b(?:charging|charge)\s+stops?\b", text):
+        return False
+    return any(phrase in text for phrase in ("how many", "need", "would i need"))
+
+
+def _extract_soc_distance_range(text: str) -> tuple[float, float] | None:
+    charge_cycle_patterns = (
+        r"\b(?:start(?:ing)?\s+to\s+charge|start(?:ing)?\s+charging|start(?:ing)?\s+charge)"
+        r"\s+(?:at|from)?\s*(\d{1,3})\s*(?:%|percent)"
+        r"[^.?!]{0,120}\b(?:stop(?:ping)?|stopping\s+charging|until|to)"
+        r"\s+(?:at\s+)?(\d{1,3})\s*(?:%|percent)",
+        r"\b(?:charge|charging)\s+from\s*(\d{1,3})\s*(?:%|percent)"
+        r"[^.?!]{0,80}\b(?:to|until)\s*(\d{1,3})\s*(?:%|percent)",
+        r"\b(?:charge|charging)\s+from\s*(\d{1,3})"
+        r"[^.?!]{0,80}\b(?:to|until)\s*(\d{1,3})\s*(?:%|percent)",
+    )
+    for pattern in charge_cycle_patterns:
+        match = re.search(pattern, text)
+        if match:
+            low = float(match.group(1))
+            high = float(match.group(2))
+            if high > low:
+                return high, low
+            return low, high
+
+    patterns = (
+        r"\b(?:from|at|current(?:ly)? at|currently have)\s*(\d{1,3})\s*(?:%|percent)"
+        r"[^.?!]{0,80}\b(?:down to|until|to|hit|reach)\s*(\d{1,3})\s*(?:%|percent)",
+        r"\b(\d{1,3})\s*(?:%|percent)[^.?!]{0,80}\b(?:down to|until|to|hit|reach)"
+        r"\s*(\d{1,3})\s*(?:%|percent)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1)), float(match.group(2))
+
+    charge_cycle = re.search(
+        r"\b(?:get to|reach|at)\s*(\d{1,3})\s*(?:%|percent)"
+        r"[^.?!]{0,120}\b(?:until|to)\s*(\d{1,3})\s*(?:%|percent)",
+        text,
+    )
+    if charge_cycle:
+        low = float(charge_cycle.group(1))
+        high = float(charge_cycle.group(2))
+        return high, low
+
+    until_empty = re.search(
+        r"\b(\d{1,3})\s*(?:%|percent)[^.?!]{0,80}\b(?:until|to)\s+empty",
+        text,
+    )
+    if until_empty:
+        return float(until_empty.group(1)), 0.0
+
+    return None
+
+
+def _extract_safety_buffer_soc(text: str) -> float | None:
+    if match := re.search(
+        r"\bdown to\s*(\d{1,3})\s*(?:%|percent)[^.?!]{0,50}"
+        r"\b(?:safety buffer|buffer|minimum)\b",
+        text,
+    ):
+        return float(match.group(1))
+    if match := re.search(
+        r"\b(?:safety buffer|buffer|minimum)\b[^.?!]{0,50}"
+        r"\b(?:at least|of|at|to)?\s*(\d{1,3})\s*(?:%|percent)",
+        text,
+    ):
+        return float(match.group(1))
+    if match := re.search(
+        r"((?:\d{1,3}\s*(?:%|percent)[^.?!]{0,30}){1,3})"
+        r"\b(?:safety buffer|buffer|minimum)\b",
+        text,
+    ):
+        values = re.findall(r"\d{1,3}", match.group(1))
+        if values:
+            return float(values[-1])
+    patterns = (
+        r"\b(?:keep|keeping|hit|reach|minimum|buffer)[^.?!]{0,40}"
+        r"(\d{1,3})\s*(?:%|percent)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def _extract_charging_target_soc(text: str) -> float | None:
+    patterns = (
+        r"\b(?:charge|charging)[^.?!]{0,80}\b(?:to|until|target)\s*(\d{1,3})\s*(?:%|percent)",
+        r"\b(?:to|until|target|standard)\s*(\d{1,3})\s*(?:%|percent)[^.?!]{0,80}\b(?:state of charge|soc|charge)",
+        r"\bstandard\s*(\d{1,3})\s*(?:%|percent)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def _extract_charging_start_soc(text: str) -> float | None:
+    patterns = (
+        r"\b(?:from|starting at|start(?:ing)? from)\s*(\d{1,3})\s*(?:%|percent)"
+        r"[^.?!]{0,80}\b(?:to|until)\s*(\d{1,3})\s*(?:%|percent)",
+        r"\b(?:once you get to|when .*?get to|at)\s*(\d{1,3})\s*(?:%|percent)"
+        r"[^.?!]{0,120}\b(?:charge|charging)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def _extract_route_kilometer(text: str) -> float | None:
+    patterns = (
+        r"\b(?:around|about|near|at|approximately)\s*(\d+(?:\.\d+)?)\s*(?:km|kilometers?)\b",
+        r"\b(\d+(?:\.\d+)?)\s*(?:km|kilometers?)\s+(?:from now|into|along)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def _extract_charging_filters(text: str) -> list[str]:
+    filters: list[str] = []
+    if any(term in text for term in ("available plug", "currently available", "available")):
+        filters.append("charging_stations::has_available_plug")
+    if any(term in text for term in ("dc", "fast charger", "fast charging")):
+        filters.append("charging_stations::has_dc_plug")
+    return filters
+
+
+def _resolve_route_energy_route_id(flow: RouteEnergyFlow) -> None:
+    if flow.route_id is not None:
+        return
+    if flow.routes_to_final_destination_id:
+        index = -1 if flow.route_selection == "last_segment" else 0
+        flow.route_id = flow.routes_to_final_destination_id[index]
+        return
+    selected_route = _select_requested_route(
+        flow.routes, flow.route_preference, flow.selected_route_index
+    )
+    if selected_route is None and len(flow.routes) == 1:
+        selected_route = flow.routes[0]
+    if selected_route is None:
+        return
+    route_id = selected_route.get("route_id")
+    if isinstance(route_id, str) and route_id:
+        flow.route_id = route_id
+
+
+def _route_energy_start_id(
+    state: ControllerState, flow: RouteEnergyFlow
+) -> str | None:
+    if flow.route_start_id:
+        return flow.route_start_id
+    if flow.route_selection == "last_segment" and len(flow.waypoints_id) >= 2:
+        return flow.waypoints_id[-2]
+    return state.runtime.location_id
+
+
+def _record_route_energy_selected_poi(
+    flow: RouteEnergyFlow, poi: dict[str, Any]
+) -> None:
+    poi_id = poi.get("id")
+    if isinstance(poi_id, str):
+        flow.selected_poi_id = poi_id
+    name = poi.get("name")
+    if isinstance(name, str):
+        flow.selected_poi_name = name
+    phone_number = poi.get("phone_number")
+    if isinstance(phone_number, str):
+        flow.selected_phone_number = phone_number
+    plug_id = _select_charging_plug_id(poi, flow.filters)
+    if plug_id is not None:
+        flow.selected_plug_id = plug_id
+
+
+def _select_route_energy_charging_option(
+    flow: RouteEnergyFlow,
+) -> dict[str, Any] | None:
+    if not flow.pois:
+        return None
+    if flow.selected_poi_id is not None:
+        for poi in flow.pois:
+            if poi.get("id") == flow.selected_poi_id:
+                return poi
+    candidates = [
+        poi
+        for poi in flow.pois
+        if _select_charging_plug_id(poi, flow.filters) is not None
+    ]
+    if not candidates:
+        candidates = flow.pois
+    return max(candidates, key=lambda poi: _charging_poi_score(poi, flow.filters))
+
+
+def _select_charging_plug_id(
+    poi: dict[str, Any], filters: list[str]
+) -> str | None:
+    plugs = poi.get("charging_plugs")
+    if not isinstance(plugs, list):
+        return None
+    scored: list[tuple[tuple[int, int, float], str]] = []
+    require_available = "charging_stations::has_available_plug" in filters
+    require_dc = "charging_stations::has_dc_plug" in filters
+    for plug in plugs:
+        if not isinstance(plug, dict):
+            continue
+        plug_id = plug.get("plug_id")
+        if not isinstance(plug_id, str):
+            continue
+        available = str(plug.get("availability", "")).lower() == "available"
+        dc = str(plug.get("power_type", "")).upper() == "DC"
+        if require_available and not available:
+            continue
+        if require_dc and not dc:
+            continue
+        power = _safe_float(plug.get("power_kw"), 0.0) or 0.0
+        scored.append(((1 if available else 0, 1 if dc else 0, power), plug_id))
+    if not scored:
+        return None
+    return max(scored)[1]
+
+
+def _charging_poi_score(poi: dict[str, Any], filters: list[str]) -> tuple[int, int, float]:
+    plugs = poi.get("charging_plugs")
+    if not isinstance(plugs, list):
+        return (0, 0, 0.0)
+    best = (0, 0, 0.0)
+    for plug in plugs:
+        if not isinstance(plug, dict):
+            continue
+        available = str(plug.get("availability", "")).lower() == "available"
+        dc = str(plug.get("power_type", "")).upper() == "DC"
+        power = _safe_float(plug.get("power_kw"), 0.0) or 0.0
+        best = max(best, (1 if available else 0, 1 if dc else 0, power))
+    return best
+
+
+def _route_energy_start_soc(flow: RouteEnergyFlow) -> float | None:
+    if flow.start_soc_for_charging is not None:
+        return flow.start_soc_for_charging
+    if flow.search_mode == "nearby" and flow.state_of_charge is not None:
+        return flow.state_of_charge
+    if (
+        flow.state_of_charge is not None
+        and flow.remaining_range_km
+        and flow.at_kilometer is not None
+    ):
+        soc_per_km = flow.state_of_charge / flow.remaining_range_km
+        estimated = max(0.0, flow.state_of_charge - flow.at_kilometer * soc_per_km)
+        return max(0.0, min(100.0, round(estimated / 5.0) * 5.0))
+    if flow.initial_soc is not None:
+        return flow.initial_soc
+    return None
+
+
+def _route_energy_selected_route_distance(flow: RouteEnergyFlow) -> float | None:
+    selected_route = _route_energy_selected_route(flow)
+    if selected_route is not None:
+        distance = _safe_float(selected_route.get("distance_km"))
+        if distance is not None:
+            return distance
+
+    if flow.route_id is not None:
+        for route in flow.route_details:
+            if route.get("route_id") != flow.route_id:
+                continue
+            distance = _safe_float(route.get("distance_km"))
+            if distance is not None:
+                return distance
+    return None
+
+
+def _route_energy_selected_route(flow: RouteEnergyFlow) -> dict[str, Any] | None:
+    if not flow.routes:
+        return None
+    selected_route = _select_requested_route(
+        flow.routes, flow.route_preference, flow.selected_route_index
+    )
+    if selected_route is not None:
+        return selected_route
+    if flow.route_id is not None:
+        for route in flow.routes:
+            if route.get("route_id") == flow.route_id:
+                return route
+    return None
+
+
+def _format_route_energy_completion(flow: RouteEnergyFlow) -> str:
+    if flow.completion_message:
+        return flow.completion_message
+    if flow.call_completed:
+        return "Done, I called the charging station."
+    if flow.charging_time_checked:
+        target = _format_percentage(flow.target_soc)
+        if flow.charging_minutes is not None:
+            minutes = int(round(flow.charging_minutes))
+            station = flow.selected_poi_name or "the charging station"
+            return f"Charging at {station} to {target} will take about {minutes} minutes."
+        return f"I calculated the charging time to {target}."
+    if flow.pois_checked and flow.pois:
+        station = flow.selected_poi_name or str(flow.pois[0].get("name", "a station"))
+        if flow.search_mode == "along_route":
+            return f"I found {station} along the route."
+        return f"I found {station} nearby."
+    if flow.wants_battery_sufficiency and flow.remaining_range_km is not None:
+        route_distance = _route_energy_selected_route_distance(flow)
+        if route_distance is not None:
+            if flow.remaining_range_km >= route_distance:
+                return (
+                    f"Yes, your remaining range is about {flow.remaining_range_km:g} km "
+                    f"and the route is about {route_distance:g} km."
+                )
+            return (
+                f"No, your remaining range is about {flow.remaining_range_km:g} km "
+                f"and the route is about {route_distance:g} km."
+            )
+        return f"Your remaining range is about {flow.remaining_range_km:g} km."
+    if (
+        flow.wants_current_range
+        and flow.remaining_range_km is not None
+        and not flow.distance_checked
+    ):
+        return f"Your remaining range is about {flow.remaining_range_km:g} km."
+    if flow.distance_checked:
+        if flow.wants_stop_count and flow.distance_km and flow.distance_km > 0:
+            route_distance = _route_energy_selected_route_distance(flow)
+            if route_distance is not None:
+                stops = max(0, math.ceil(route_distance / flow.distance_km) - 1)
+                plural = "stop" if stops == 1 else "stops"
+                selected_route = _route_energy_selected_route(flow)
+                route_label = (
+                    _route_choice_label(selected_route, flow.route_preference)
+                    if selected_route is not None
+                    else None
+                )
+                route_phrase = (
+                    f"the {route_label} route" if route_label else "that route"
+                )
+                message = (
+                    f"You would need about {stops} charging {plural} "
+                    f"for {route_phrase}."
+                )
+                if route_label and len(flow.routes) > 1:
+                    message += " Would you like more information on alternative routes?"
+                return message
+        if flow.distance_km is not None:
+            route_summary = _format_current_route_energy_summary(flow)
+            if route_summary is not None:
+                return (
+                    f"{route_summary} You can drive about {flow.distance_km:g} km "
+                    "for that battery range."
+                )
+            return f"You can drive about {flow.distance_km:g} km for that battery range."
+        return "I checked the driving distance for that battery range."
+    return "Done, I checked the route and charging information."
+
+
+def _format_current_route_energy_summary(flow: RouteEnergyFlow) -> str | None:
+    if not flow.route_details:
+        return None
+    distances = [
+        distance
+        for route in flow.route_details
+        if (distance := _safe_float(route.get("distance_km"))) is not None
+    ]
+    if not distances:
+        return None
+    total_distance = sum(distances)
+    fastest = all(_route_has_alias(route, "fastest") for route in flow.route_details)
+    route_text = f"The total route distance is about {total_distance:g} km."
+    if fastest:
+        route_text += " The current route uses the fastest route segments."
+    return route_text
+
+
+def _route_has_alias(route: dict[str, Any], alias: str) -> bool:
+    aliases = route.get("alias")
+    if not isinstance(aliases, list):
+        return False
+    return alias in {str(value).lower() for value in aliases}
+
+
+def _extract_km_value(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:km|kilometers?)", value)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _extract_first_km_value(value: Any) -> float | None:
+    if isinstance(value, dict):
+        for nested in value.values():
+            extracted = _extract_first_km_value(nested)
+            if extracted is not None:
+                return extracted
+    if isinstance(value, list):
+        for nested in value:
+            extracted = _extract_first_km_value(nested)
+            if extracted is not None:
+                return extracted
+    return _extract_km_value(value)
+
+
+def _extract_minutes_value(value: Any) -> float | None:
+    if isinstance(value, dict):
+        if "minutes" in value and isinstance(value.get("minutes"), (int, float)):
+            hours = _safe_float(value.get("hour"), 0.0) or 0.0
+            return hours * 60 + float(value["minutes"])
+        for nested in value.values():
+            extracted = _extract_minutes_value(nested)
+            if extracted is not None:
+                return extracted
+    if isinstance(value, list):
+        for nested in value:
+            extracted = _extract_minutes_value(nested)
+            if extracted is not None:
+                return extracted
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|min)\b", value)
+        if match:
+            return float(match.group(1))
+    return None
 
 
 POI_CATEGORY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -4752,7 +7402,6 @@ def _select_poi_from_text(
     if option_index is not None:
         if 0 <= option_index < len(pois):
             return pois[option_index]
-        return None
 
     normalized_text = _normalized_text(text)
     for poi in pois:
@@ -4773,10 +7422,6 @@ def _select_poi_from_text(
 
 
 def _extract_poi_option_index(text: str) -> int | None:
-    route_index = _extract_route_choice_index(text)
-    if route_index is not None:
-        return route_index
-
     ordinal_to_index = {
         "first": 0,
         "1st": 0,
@@ -5006,15 +7651,20 @@ def _navigation_completion_message(
     action_summary: str,
     route: dict[str, Any],
     preference: Literal["fastest", "shortest"] | None,
+    considered_routes: list[dict[str, Any]] | None = None,
 ) -> str:
     parts = [f"Done, {action_summary}."]
     route_choice = _route_choice_label(route, preference)
     if route_choice:
         parts.append(f"I used the {route_choice} route.")
-    if _route_has_toll(route):
-        parts.append("This route includes toll roads.")
-    if route_choice:
-        parts.append("Would you like information on alternative routes?")
+    toll_notice = _route_toll_notice_parts(
+        [route],
+        considered_routes,
+        selected_text="This route includes toll roads.",
+        alternative_text="An available alternative route includes toll roads.",
+        alternative_question="Would you like more information on the alternative routes?",
+    )
+    parts.extend(toll_notice)
     return " ".join(parts)
 
 
@@ -5022,15 +7672,20 @@ def _navigation_multi_route_completion_message(
     action_summary: str,
     routes: list[dict[str, Any]],
     preference: Literal["fastest", "shortest"] | None,
+    considered_routes: list[dict[str, Any]] | None = None,
 ) -> str:
     parts = [f"Done, {action_summary}."]
     route_choice = _route_choice_label(routes[0], preference) if routes else None
     if route_choice:
         parts.append(f"I used the {route_choice} route segments.")
-    if any(_route_has_toll(route) for route in routes):
-        parts.append("At least one route segment includes toll roads.")
-    if route_choice:
-        parts.append("Would you like information on alternative route segments?")
+    toll_notice = _route_toll_notice_parts(
+        routes,
+        considered_routes,
+        selected_text="At least one selected route segment includes toll roads.",
+        alternative_text="An available alternative route segment includes toll roads.",
+        alternative_question="Would you like more information on the alternative route segments?",
+    )
+    parts.extend(toll_notice)
     return " ".join(parts)
 
 
@@ -5064,6 +7719,24 @@ def _route_has_toll(route: dict[str, Any]) -> bool:
     if isinstance(road_types, list):
         return any("toll" in str(road_type).lower() for road_type in road_types)
     return False
+
+
+def _route_toll_notice_parts(
+    selected_routes: list[dict[str, Any]],
+    considered_routes: list[dict[str, Any]] | None,
+    *,
+    selected_text: str,
+    alternative_text: str,
+    alternative_question: str | None = None,
+) -> list[str]:
+    if any(_route_has_toll(route) for route in selected_routes):
+        return [selected_text]
+    if considered_routes and any(_route_has_toll(route) for route in considered_routes):
+        parts = [alternative_text]
+        if alternative_question:
+            parts.append(alternative_question)
+        return parts
+    return []
 
 
 def _select_route(
@@ -5119,6 +7792,29 @@ def _route_choice_is_unambiguous(routes: list[dict[str, Any]]) -> bool:
     )
 
 
+def _is_route_alternative_detail_request(text: str) -> bool:
+    patterns = (
+        r"\b(?:what|which)\b[^.?!]{0,40}\b(?:other|another|alternative|second|third)\b"
+        r"[^.?!]{0,40}\b(?:route|alternative|option|one)\b",
+        r"\b(?:tell|describe)\b[^.?!]{0,40}\b(?:other|another|alternative|second|third)\b"
+        r"[^.?!]{0,40}\b(?:route|alternative|option|one)\b",
+        r"\b(?:other|another|alternative|second|third)\b[^.?!]{0,40}"
+        r"\b(?:route|alternative|option|one)\b[^.?!]{0,40}\b(?:details?|info|information)\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _is_route_choice_preview_request(text: str) -> bool:
+    if _is_route_alternative_detail_request(text):
+        return True
+    if not _do_not_set_navigation(text):
+        return False
+    return bool(
+        re.search(r"\b(show|see|view|check|look)\b", text)
+        and re.search(r"\b(route|option|alternative|via)\b", text)
+    )
+
+
 def _format_route_choice_prompt(routes: list[dict[str, Any]]) -> str:
     fastest = _select_route(routes, "fastest")
     shortest = _select_route(routes, "shortest")
@@ -5140,8 +7836,7 @@ def _format_route_choice_prompt(routes: list[dict[str, Any]]) -> str:
             )
         return (
             f"I selected the fastest route: {_route_summary(fastest)}. "
-            "It is also the shortest route. Do you want me to apply it, "
-            "or would you like more information on alternative routes?"
+            "It is also the shortest route. Do you want me to apply it?"
         )
     if fastest is not None and shortest is not None:
         extra_count = max(len(routes) - len({id(fastest), id(shortest)}), 0)
@@ -5161,6 +7856,50 @@ def _format_route_choice_prompt(routes: list[dict[str, Any]]) -> str:
             "Do you want the first route or the second route?"
         )
     return "I found multiple routes. Do you want the fastest or shortest route?"
+
+
+def _format_route_alternative_detail_prompt(routes: list[dict[str, Any]]) -> str:
+    if not routes:
+        return "I don't have route alternatives available. Do you want the fastest or shortest route?"
+
+    labels = ("First", "Second", "Third", "Fourth", "Fifth")
+    parts = []
+    for index, route in enumerate(routes[:5]):
+        label = _route_display_label(route, index, labels)
+        parts.append(f"{label}: {_route_summary(route)}.")
+
+    choices = _route_choice_labels(routes[:5])
+    if choices:
+        parts.append(f"Which route would you like: {choices}?")
+    else:
+        parts.append("Which route would you like?")
+    return " ".join(parts)
+
+
+def _route_display_label(
+    route: dict[str, Any], index: int, labels: tuple[str, ...]
+) -> str:
+    aliases = route.get("alias") or []
+    if isinstance(aliases, list):
+        lowered = {str(alias).lower() for alias in aliases}
+        for preferred in ("fastest", "shortest", "second", "third", "first"):
+            if preferred in lowered:
+                return preferred.capitalize()
+    return labels[index] if index < len(labels) else f"Route {index + 1}"
+
+
+def _route_choice_labels(routes: list[dict[str, Any]]) -> str:
+    labels: list[str] = []
+    for index, route in enumerate(routes):
+        label = _route_display_label(route, index, ("first", "second", "third"))
+        lowered = label.lower()
+        if lowered not in labels:
+            labels.append(lowered)
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    return f"{', '.join(labels[:-1])}, or {labels[-1]}"
 
 
 def _route_summary(route: dict[str, Any]) -> str:
@@ -5509,6 +8248,13 @@ def _extract_preferred_air_circulation_mode(
     return None
 
 
+def _extract_preferred_temperature(result: dict[str, Any]) -> float | None:
+    text = json.dumps(result, ensure_ascii=False).lower()
+    if "temperature" not in text and "temp" not in text:
+        return None
+    return _extract_temperature_setting(text)
+
+
 def _record_defrost_window_position(
     defrost: DefrostFlow, window: str, percentage: int
 ) -> None:
@@ -5601,6 +8347,100 @@ def _air_conditioning_open_windows(ac: AirConditioningFlow) -> list[tuple[str, i
     ]
 
 
+def _format_air_conditioning_completion(ac: AirConditioningFlow) -> str:
+    completed = []
+    if ac.closed_windows_for_ac:
+        completed.append("closed the open windows")
+    if ac.fan_target_level is not None and ac.fan_speed == ac.fan_target_level:
+        completed.append(f"set the fan speed to level {ac.fan_target_level}")
+    completed.append("turned on the air conditioning")
+
+    if len(completed) == 1:
+        summary = completed[0]
+    elif len(completed) == 2:
+        summary = f"{completed[0]} and {completed[1]}"
+    else:
+        summary = f"{', '.join(completed[:-1])}, and {completed[-1]}"
+    return f"Done, I {summary}."
+
+
+def _format_combined_window_completion(
+    window: str | None,
+    percentage: int | None,
+) -> str | None:
+    if window is None or percentage is None:
+        return None
+    return f"opened {friendly_window_name(window)} to {_format_percentage(percentage)}"
+
+
+def _record_recent_window_position(
+    state: ControllerState,
+    window: str,
+    percentage: int,
+) -> None:
+    if window == "ALL":
+        for key in ("DRIVER", "PASSENGER", "DRIVER_REAR", "PASSENGER_REAR"):
+            state.recent_window_positions[key] = percentage
+        return
+    state.recent_window_positions[window] = percentage
+
+
+def _is_window_ac_status_query(text: str) -> bool:
+    return bool(
+        "window" in text
+        and ("ac" in text or "air conditioning" in text)
+        and any(
+            phrase in text
+            for phrase in (
+                "still open",
+                "with the ac",
+                "with ac",
+                "even with",
+                "are still",
+            )
+        )
+    )
+
+
+def _format_recent_window_ac_status(state: ControllerState) -> str | None:
+    positions = state.recent_window_positions
+    if not positions:
+        return None
+    known_positions = [
+        positions.get(key)
+        for key in ("DRIVER", "PASSENGER", "DRIVER_REAR", "PASSENGER_REAR")
+    ]
+    if any(position is None for position in known_positions):
+        return None
+    unique_positions = set(known_positions)
+    if len(unique_positions) != 1:
+        return None
+    window_position = unique_positions.pop()
+    ac = state.recent_air_conditioning
+    if ac is None:
+        return None
+    ac_text = "on" if ac else "off"
+    air_mode = (
+        f" and air circulation is set to {_friendly_air_mode(state.recent_air_circulation)}"
+        if state.recent_air_circulation in {"FRESH_AIR", "RECIRCULATION", "AUTO"}
+        else ""
+    )
+    return (
+        f"Yes, all windows are open to {_format_percentage(window_position)} "
+        f"and the air conditioning is {ac_text}{air_mode}."
+    )
+
+
+def _join_completed_actions(actions: list[str]) -> str:
+    if not actions:
+        return "completed that"
+    if len(actions) == 1:
+        return actions[0]
+    if len(actions) == 2:
+        return f"{actions[0]} and {actions[1]}"
+    return f"{', '.join(actions[:-1])}, and {actions[-1]}"
+
+
 def _reading_light_actions_for_occupancy(
     seats_occupied: dict[str, bool],
 ) -> list[tuple[str, bool]]:
@@ -5679,6 +8519,56 @@ def _friendly_reading_light_position(position: str | None) -> str:
     }.get(position, "the requested")
 
 
+def _format_climate_inspection_summary(climate: ClimateInspectionFlow) -> str:
+    parts = []
+    if climate.needs_temperature:
+        parts.append(
+            "Current temperatures are "
+            f"driver {_format_temperature(climate.driver_temperature, climate.temperature_unit)} "
+            f"and passenger {_format_temperature(climate.passenger_temperature, climate.temperature_unit)}"
+        )
+    if climate.needs_seat_heating:
+        parts.append(
+            "seat heating is "
+            f"driver level {climate.seat_heating_driver} "
+            f"and passenger level {climate.seat_heating_passenger}"
+        )
+    return f"{'; '.join(parts)}."
+
+
+def _format_temperature(value: float | None, unit: str) -> str:
+    if value is None:
+        return "unknown"
+    unit_text = "C" if unit.lower().startswith("celsius") else unit
+    if float(value).is_integer():
+        number = str(int(value))
+    else:
+        number = f"{value:.1f}"
+    return f"{number} {unit_text}"
+
+
+def _format_temperature_target(value: float | None) -> str:
+    if value is None:
+        return "the requested temperature"
+    if float(value).is_integer():
+        return f"{int(value)} C"
+    return f"{value:.1f} C"
+
+
+def _seat_heating_zone_for_occupied_front_seats(
+    seats_occupied: dict[str, bool],
+) -> str | None:
+    driver = seats_occupied.get("driver") is True
+    passenger = seats_occupied.get("passenger") is True
+    if driver and passenger:
+        return "ALL_ZONES"
+    if driver:
+        return "DRIVER"
+    if passenger:
+        return "PASSENGER"
+    return None
+
+
 def _bounded_percentage(value: Any) -> int | None:
     try:
         number = int(float(value))
@@ -5744,3 +8634,11 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _json_number(value: float | int | None) -> float | int | None:
+    if isinstance(value, bool) or value is None:
+        return value
+    if float(value).is_integer():
+        return int(value)
+    return float(value)
