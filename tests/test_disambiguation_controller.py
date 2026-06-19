@@ -82,6 +82,19 @@ def occupancy_comfort_tools() -> list[dict]:
     ]
 
 
+def comprehensive_comfort_tools() -> list[dict]:
+    return [
+        fake_tool("get_user_preferences"),
+        fake_tool("get_seat_heating_level"),
+        *occupancy_comfort_tools(),
+        fake_tool(
+            "set_steering_wheel_heating",
+            {"level": {"type": "integer"}},
+            ["level"],
+        ),
+    ]
+
+
 def driver_comfort_tools() -> list[dict]:
     return [
         fake_tool("get_user_preferences"),
@@ -100,6 +113,32 @@ def driver_comfort_tools() -> list[dict]:
                 "level": {"type": "integer"},
             },
             ["seat_zone", "level"],
+        ),
+    ]
+
+
+def passenger_comfort_match_tools(*, include_seat_zone: bool = True) -> list[dict]:
+    seat_properties = {"level": {"type": "integer"}}
+    seat_required = ["level"]
+    if include_seat_zone:
+        seat_properties["seat_zone"] = {"type": "string"}
+        seat_required.append("seat_zone")
+
+    return [
+        fake_tool(
+            "set_climate_temperature",
+            {
+                "seat_zone": {"type": "string"},
+                "temperature": {"type": "number"},
+            },
+            ["seat_zone", "temperature"],
+        ),
+        fake_tool("get_seat_heating_level"),
+        fake_tool("set_seat_heating", seat_properties, seat_required),
+        fake_tool(
+            "set_steering_wheel_heating",
+            {"level": {"type": "integer"}},
+            ["level"],
         ),
     ]
 
@@ -264,6 +303,112 @@ def test_occupancy_comfort_asks_for_settings_then_sets_occupied_seats() -> None:
     ]
 
 
+def test_comprehensive_occupancy_warming_uses_preferences_and_current_heating() -> None:
+    controller = PolicyAwareController()
+    tools = comprehensive_comfort_tools()
+
+    action = controller.decide(
+        context_id="ctx-comprehensive-warming",
+        messages=messages(),
+        tools=tools,
+        latest_user_text=(
+            "It's very cold. Warm up the car comprehensively: set the cabin "
+            "to my usual comfortable temperature, increase the seat heating "
+            "by two levels where people are sitting, and turn on steering "
+            "wheel heating."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "get_seat_heating_level", "arguments": {}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-comprehensive-warming",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_seat_heating_level",
+                {"seat_heating_driver": 0, "seat_heating_passenger": 0},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_seats_occupancy", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-comprehensive-warming",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_seats_occupancy",
+                {"seats_occupied": {"driver": True, "passenger": True}},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls[0]["tool_name"] == "get_user_preferences"
+
+    action = controller.decide(
+        context_id="ctx-comprehensive-warming",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_user_preferences",
+                {
+                    "vehicle_settings": {
+                        "climate_control": [
+                            "default comfortable temperature is 22 degree"
+                        ]
+                    }
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "set_climate_temperature",
+            "arguments": {"seat_zone": "ALL_ZONES", "temperature": 22.0},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-comprehensive-warming",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "set_climate_temperature",
+                {"seat_zone": "ALL_ZONES", "temperature": 22},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "set_seat_heating",
+            "arguments": {"seat_zone": "ALL_ZONES", "level": 2},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-comprehensive-warming",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result("set_seat_heating", {"seat_zone": "ALL_ZONES", "level": 2})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "set_steering_wheel_heating", "arguments": {"level": 2}}
+    ]
+
+
 def test_occupancy_comfort_refuses_missing_occupancy_result() -> None:
     controller = PolicyAwareController()
     tools = occupancy_comfort_tools()
@@ -285,6 +430,118 @@ def test_occupancy_comfort_refuses_missing_occupancy_result() -> None:
     assert action is not None
     assert action.action == "respond"
     assert "can't tell which seats are occupied" in action.content.lower()
+
+
+def test_passenger_comfort_match_sets_temperature_and_matches_driver_heating() -> None:
+    controller = PolicyAwareController()
+    tools = passenger_comfort_match_tools()
+
+    action = controller.decide(
+        context_id="ctx-passenger-match",
+        messages=messages(),
+        tools=tools,
+        latest_user_text=(
+            "Set the passenger side temperature to 24 degrees Celsius, "
+            "make the passenger seat heating match the driver's seat heating, "
+            "and set the steering wheel heating to the same level."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "set_climate_temperature",
+            "arguments": {"seat_zone": "PASSENGER", "temperature": 24.0},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-passenger-match",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "set_climate_temperature",
+                {"seat_zone": "PASSENGER", "temperature": 24},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "get_seat_heating_level", "arguments": {}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-passenger-match",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_seat_heating_level",
+                {"seat_heating_driver": 3, "seat_heating_passenger": 0},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "set_seat_heating",
+            "arguments": {"seat_zone": "PASSENGER", "level": 3},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-passenger-match",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result("set_seat_heating", {"seat_zone": "PASSENGER", "level": 3})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "set_steering_wheel_heating", "arguments": {"level": 3}}
+    ]
+
+
+def test_passenger_comfort_match_refuses_missing_seat_zone_parameter() -> None:
+    controller = PolicyAwareController()
+    tools = passenger_comfort_match_tools(include_seat_zone=False)
+
+    controller.decide(
+        context_id="ctx-passenger-match-missing-seat-zone",
+        messages=messages(),
+        tools=tools,
+        latest_user_text=(
+            "Set the passenger side temperature to 24 degrees Celsius, "
+            "make the passenger seat heating match the driver's seat heating, "
+            "and set the steering wheel heating to the same level."
+        ),
+    )
+    controller.decide(
+        context_id="ctx-passenger-match-missing-seat-zone",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "set_climate_temperature",
+                {"seat_zone": "PASSENGER", "temperature": 24},
+            )
+        ],
+    )
+    action = controller.decide(
+        context_id="ctx-passenger-match-missing-seat-zone",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_seat_heating_level",
+                {"seat_heating_driver": 3, "seat_heating_passenger": 0},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "seat selector is unavailable" in action.content.lower()
 
 
 def test_driver_comfort_turns_off_passenger_heat_and_uses_preference() -> None:
@@ -353,6 +610,28 @@ def test_driver_comfort_turns_off_passenger_heat_and_uses_preference() -> None:
         {
             "tool_name": "set_climate_temperature",
             "arguments": {"seat_zone": "DRIVER", "temperature": 22.0},
+        }
+    ]
+
+
+def test_driver_comfort_understands_my_temperature_after_passenger_heat_off() -> None:
+    controller = PolicyAwareController()
+    tools = driver_comfort_tools()
+
+    action = controller.decide(
+        context_id="ctx-driver-comfort-my-temp",
+        messages=messages(),
+        tools=tools,
+        latest_user_text=(
+            "Since it's just me, turn off the passenger seat heating and "
+            "then raise my temperature to my comfort level."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "set_seat_heating",
+            "arguments": {"seat_zone": "PASSENGER", "level": 0},
         }
     ]
 

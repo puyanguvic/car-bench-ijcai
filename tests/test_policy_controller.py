@@ -263,6 +263,38 @@ def test_navigation_controller_replaces_final_destination_with_route_evidence() 
     ]
 
 
+def test_navigation_refuses_when_route_result_is_unavailable() -> None:
+    controller = PolicyAwareController()
+    messages = system_messages(location_id="loc_bochum_001")
+    tools = navigation_tools()
+
+    controller.decide(
+        context_id="ctx-route-result-unavailable",
+        messages=messages,
+        tools=tools,
+        latest_user_text="Change my navigation destination from Milan to Hamburg.",
+    )
+    controller.decide(
+        context_id="ctx-route-result-unavailable",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_location_id_by_location_name", {"id": "loc_ham_003"})
+        ],
+    )
+    action = controller.decide(
+        context_id="ctx-route-result-unavailable",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_routes_from_start_to_destination", {"routes": "unknown"})
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "can't determine the route options" in action.content.lower()
+
+
 def test_navigation_followup_replaces_destination_after_change_prompt() -> None:
     controller = PolicyAwareController()
     messages = system_messages(location_id="loc_bochum_001")

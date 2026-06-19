@@ -214,8 +214,16 @@ class OccupancyComfortFlow:
     seats_occupied: dict[str, bool] = field(default_factory=dict)
     target_temperature: float | None = None
     target_heating_level: int | None = None
+    heating_delta: int | None = None
+    seat_heating_checked: bool = False
+    seat_heating_driver: int | None = None
+    seat_heating_passenger: int | None = None
+    preferences_checked: bool = False
+    steering_wheel_requested: bool = False
+    steering_wheel_level: int | None = None
     temperature_set: bool = False
     seat_heating_set: bool = False
+    steering_wheel_set: bool = False
     completed: bool = False
 
 
@@ -227,6 +235,19 @@ class DriverComfortTemperatureFlow:
     target_temperature: float | None = None
     preferences_checked: bool = False
     temperature_set: bool = False
+    completed: bool = False
+
+
+@dataclass
+class PassengerComfortMatchFlow:
+    active: bool = False
+    target_temperature: float | None = None
+    temperature_set: bool = False
+    seat_heating_checked: bool = False
+    driver_heating_level: int | None = None
+    passenger_heating_level: int | None = None
+    passenger_heating_set: bool = False
+    steering_wheel_set: bool = False
     completed: bool = False
 
 
@@ -490,6 +511,9 @@ class ControllerState:
     driver_comfort_temperature: DriverComfortTemperatureFlow = field(
         default_factory=DriverComfortTemperatureFlow
     )
+    passenger_comfort_match: PassengerComfortMatchFlow = field(
+        default_factory=PassengerComfortMatchFlow
+    )
     reading_light: ReadingLightFlow = field(default_factory=ReadingLightFlow)
     reading_light_occupancy: ReadingLightOccupancyFlow = field(
         default_factory=ReadingLightOccupancyFlow
@@ -589,6 +613,8 @@ class PolicyAwareController:
             action = self._next_occupancy_comfort_action(state, tool_index)
         elif state.driver_comfort_temperature.active:
             action = self._next_driver_comfort_temperature_action(state, tool_index)
+        elif state.passenger_comfort_match.active:
+            action = self._next_passenger_comfort_match_action(state, tool_index)
         elif state.reading_light_occupancy.active:
             action = self._next_reading_light_occupancy_action(state, tool_index)
         elif state.reading_light.active:
@@ -685,6 +711,8 @@ class PolicyAwareController:
             and not state.occupancy_comfort.completed,
             state.driver_comfort_temperature.active
             and not state.driver_comfort_temperature.completed,
+            state.passenger_comfort_match.active
+            and not state.passenger_comfort_match.completed,
             state.defrost.active and not state.defrost.completed,
             state.poi.active and not state.poi.completed,
             state.route_energy.active and not state.route_energy.completed,
@@ -710,6 +738,8 @@ class PolicyAwareController:
             state.occupancy_comfort = OccupancyComfortFlow()
         if state.driver_comfort_temperature.completed:
             state.driver_comfort_temperature = DriverComfortTemperatureFlow()
+        if state.passenger_comfort_match.completed:
+            state.passenger_comfort_match = PassengerComfortMatchFlow()
         if state.poi.completed:
             state.poi = POIFlow()
         if state.route_energy.completed:
@@ -742,6 +772,8 @@ class PolicyAwareController:
             state.occupancy_comfort = OccupancyComfortFlow()
         if state.driver_comfort_temperature.completed:
             state.driver_comfort_temperature = DriverComfortTemperatureFlow()
+        if state.passenger_comfort_match.completed:
+            state.passenger_comfort_match = PassengerComfortMatchFlow()
         if state.defrost.completed:
             state.defrost = DefrostFlow()
         if state.poi.completed:
@@ -1011,7 +1043,15 @@ class PolicyAwareController:
         if state.occupancy_comfort.active:
             clarified_temperature = _extract_temperature_setting(lowered)
             clarified_level = _extract_heating_level(lowered)
+            clarified_delta = _extract_heating_delta(lowered)
             updated = False
+            if (
+                "steering wheel" in lowered
+                and clarified_level is not None
+                and state.occupancy_comfort.steering_wheel_level is None
+            ):
+                state.occupancy_comfort.steering_wheel_level = clarified_level
+                updated = True
             if (
                 clarified_temperature is not None
                 and state.occupancy_comfort.target_temperature is None
@@ -1019,8 +1059,16 @@ class PolicyAwareController:
                 state.occupancy_comfort.target_temperature = clarified_temperature
                 updated = True
             if (
+                clarified_delta is not None
+                and state.occupancy_comfort.heating_delta is None
+            ):
+                state.occupancy_comfort.heating_delta = clarified_delta
+                updated = True
+            if (
                 clarified_level is not None
                 and state.occupancy_comfort.target_heating_level is None
+                and "steering wheel" not in lowered
+                and clarified_delta is None
             ):
                 state.occupancy_comfort.target_heating_level = clarified_level
                 updated = True
@@ -1227,11 +1275,19 @@ class PolicyAwareController:
                 active=True,
                 mode=_extract_air_circulation_mode(lowered),
             )
+        elif _is_passenger_comfort_match_request(lowered):
+            state.passenger_comfort_match = PassengerComfortMatchFlow(
+                active=True,
+                target_temperature=_extract_temperature_setting(lowered),
+            )
         elif _is_occupancy_comfort_request(lowered):
             state.occupancy_comfort = OccupancyComfortFlow(
                 active=True,
                 target_temperature=_extract_temperature_setting(lowered),
-                target_heating_level=_extract_heating_level(lowered),
+                target_heating_level=_extract_seat_heating_target_level(lowered),
+                heating_delta=_extract_heating_delta(lowered),
+                steering_wheel_requested="steering wheel" in lowered,
+                steering_wheel_level=_extract_steering_wheel_heating_level(lowered),
             )
         elif _is_driver_comfort_temperature_request(lowered):
             state.driver_comfort_temperature = DriverComfortTemperatureFlow(
@@ -1481,6 +1537,12 @@ class PolicyAwareController:
                     state.driver_comfort_temperature.target_temperature = (
                         preferred_temperature
                     )
+                state.occupancy_comfort.preferences_checked = True
+                if (
+                    preferred_temperature is not None
+                    and state.occupancy_comfort.target_temperature is None
+                ):
+                    state.occupancy_comfort.target_temperature = preferred_temperature
                 state.business_email_extra_recipients = (
                     state.business_email_extra_recipients
                     + [
@@ -1568,6 +1630,26 @@ class PolicyAwareController:
                 climate.seat_heating_passenger = _safe_int(
                     result.get("seat_heating_passenger"),
                     climate.seat_heating_passenger,
+                )
+                occupancy = state.occupancy_comfort
+                occupancy.seat_heating_checked = True
+                occupancy.seat_heating_driver = _safe_int(
+                    result.get("seat_heating_driver"),
+                    occupancy.seat_heating_driver,
+                )
+                occupancy.seat_heating_passenger = _safe_int(
+                    result.get("seat_heating_passenger"),
+                    occupancy.seat_heating_passenger,
+                )
+                passenger_match = state.passenger_comfort_match
+                passenger_match.seat_heating_checked = True
+                passenger_match.driver_heating_level = _safe_int(
+                    result.get("seat_heating_driver"),
+                    passenger_match.driver_heating_level,
+                )
+                passenger_match.passenger_heating_level = _safe_int(
+                    result.get("seat_heating_passenger"),
+                    passenger_match.passenger_heating_level,
                 )
             elif name == "open_close_window" and isinstance(result, dict):
                 state.window.completed = True
@@ -1730,11 +1812,24 @@ class PolicyAwareController:
             elif name == "set_steering_wheel_heating" and isinstance(result, dict):
                 if state.steering_wheel_heating.active:
                     state.steering_wheel_heating.completed = True
+                if state.occupancy_comfort.active:
+                    state.occupancy_comfort.steering_wheel_set = True
+                if state.passenger_comfort_match.active:
+                    state.passenger_comfort_match.steering_wheel_set = True
                 level = _safe_int(
                     result.get("level"), state.steering_wheel_heating.level
                 )
                 if level is not None:
                     state.steering_wheel_heating.level = level
+                    if state.occupancy_comfort.active:
+                        state.occupancy_comfort.steering_wheel_level = level
+                    if state.passenger_comfort_match.active:
+                        state.passenger_comfort_match.passenger_heating_level = (
+                            state.passenger_comfort_match.passenger_heating_level
+                            if state.passenger_comfort_match.passenger_heating_level
+                            is not None
+                            else level
+                        )
             elif name == "set_climate_temperature" and isinstance(result, dict):
                 if state.occupancy_comfort.active:
                     state.occupancy_comfort.temperature_set = True
@@ -1754,6 +1849,14 @@ class PolicyAwareController:
                         state.driver_comfort_temperature.target_temperature = (
                             temperature
                         )
+                if state.passenger_comfort_match.active:
+                    state.passenger_comfort_match.temperature_set = True
+                    temperature = _safe_float(
+                        result.get("temperature"),
+                        state.passenger_comfort_match.target_temperature,
+                    )
+                    if temperature is not None:
+                        state.passenger_comfort_match.target_temperature = temperature
             elif name == "set_seat_heating" and isinstance(result, dict):
                 if state.occupancy_comfort.active:
                     state.occupancy_comfort.seat_heating_set = True
@@ -1768,6 +1871,16 @@ class PolicyAwareController:
                     level = _safe_int(result.get("level"))
                     if seat_zone == "PASSENGER" and level == 0:
                         state.driver_comfort_temperature.passenger_heating_off = True
+                if state.passenger_comfort_match.active:
+                    seat_zone = result.get("seat_zone")
+                    level = _safe_int(
+                        result.get("level"),
+                        state.passenger_comfort_match.driver_heating_level,
+                    )
+                    if seat_zone == "PASSENGER" or seat_zone is None:
+                        state.passenger_comfort_match.passenger_heating_set = True
+                    if level is not None:
+                        state.passenger_comfort_match.passenger_heating_level = level
             elif name == "set_reading_light" and isinstance(result, dict):
                 if state.reading_light_occupancy.active:
                     if state.reading_light_occupancy.pending_actions:
@@ -1983,7 +2096,7 @@ class PolicyAwareController:
                     state.poi.routes_checked = True
                     state.poi.routes = []
                     state.poi.failure_message = (
-                        "I couldn't find a route to that destination."
+                        "I can't determine the route options from the available route result."
                     )
                 elif state.route_energy.active:
                     route_energy = state.route_energy
@@ -1997,12 +2110,12 @@ class PolicyAwareController:
                         route_energy.routes_checked = True
                         route_energy.routes = []
                     route_energy.failure_message = (
-                        "I couldn't find a route to that destination."
+                        "I can't determine the route options from the available route result."
                     )
                 elif state.navigation.active:
                     _record_navigation_routes(state.navigation, [])
                     state.navigation.failure_message = (
-                        "I couldn't find a route to that destination."
+                        "I can't determine the route options from the available route result."
                     )
             elif name == "get_charging_specs_and_status":
                 if state.route_energy.active:
@@ -2903,6 +3016,18 @@ class PolicyAwareController:
     ) -> NextAction | None:
         comfort = state.occupancy_comfort
 
+        if comfort.heating_delta is not None and not comfort.seat_heating_checked:
+            if not tool_index.has("get_seat_heating_level"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't check the current seat heating levels, so I can't increase them by the requested amount.",
+                    reason="occupancy_comfort_missing_seat_heating_check",
+                )
+            return NextAction.tool_call(
+                "get_seat_heating_level",
+                reason="occupancy_comfort_seat_heating_check",
+            )
+
         if not comfort.seats_checked:
             if not tool_index.has("get_seats_occupancy"):
                 comfort.completed = True
@@ -2923,10 +3048,32 @@ class PolicyAwareController:
             )
 
         if comfort.target_temperature is None:
+            if not comfort.preferences_checked and tool_index.has(
+                "get_user_preferences"
+            ):
+                return NextAction.tool_call(
+                    "get_user_preferences",
+                    {
+                        "preference_categories": {
+                            "vehicle_settings": {"climate_control": True}
+                        }
+                    },
+                    reason="occupancy_comfort_temperature_preferences",
+                )
             return NextAction.respond(
                 "What cabin temperature should I set?",
                 reason="occupancy_comfort_temperature_disambiguation",
             )
+
+        if comfort.target_heating_level is None and comfort.heating_delta is not None:
+            target_level = _occupied_front_seat_heating_target(comfort)
+            if target_level is None:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't determine the current occupied-seat heating levels from the available tool result.",
+                    reason="occupancy_comfort_missing_current_heating_result",
+                )
+            comfort.target_heating_level = target_level
 
         if comfort.target_heating_level is None:
             return NextAction.respond(
@@ -2989,12 +3136,158 @@ class PolicyAwareController:
                 reason="occupancy_comfort_set_seat_heating",
             )
 
+        if comfort.steering_wheel_requested and not comfort.steering_wheel_set:
+            if comfort.steering_wheel_level is None:
+                comfort.steering_wheel_level = comfort.target_heating_level
+            if not tool_index.has("set_steering_wheel_heating"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't adjust the steering wheel heating because that control is unavailable right now.",
+                    reason="occupancy_comfort_missing_steering_heating_tool",
+                )
+            if not _tool_argument_available(
+                tool_index, "set_steering_wheel_heating", "level"
+            ):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't adjust the steering wheel heating because the required level control is unavailable right now.",
+                    reason="occupancy_comfort_missing_steering_heating_parameter",
+                )
+            return NextAction.tool_call(
+                "set_steering_wheel_heating",
+                {"level": comfort.steering_wheel_level},
+                reason="occupancy_comfort_set_steering_wheel_heating",
+            )
+
+        comfort.completed = True
+        completed = [
+            "set the cabin temperature to "
+            f"{_format_temperature_target(comfort.target_temperature)}",
+            "adjusted seat heating for the occupied seats",
+        ]
+        if comfort.steering_wheel_requested:
+            level = (
+                comfort.steering_wheel_level
+                if comfort.steering_wheel_level is not None
+                else comfort.target_heating_level
+            )
+            completed.append(f"set steering wheel heating to level {level}")
+        return NextAction.respond(
+            f"Done, I {_join_completed_actions(completed)}.",
+            reason="occupancy_comfort_done",
+        )
+
+    def _next_passenger_comfort_match_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        comfort = state.passenger_comfort_match
+
+        if comfort.completed:
+            state.passenger_comfort_match = PassengerComfortMatchFlow()
+            return NextAction.respond(
+                "Done, I matched the passenger comfort settings to the driver side.",
+                reason="passenger_comfort_match_done",
+            )
+
+        if comfort.target_temperature is None:
+            return NextAction.respond(
+                "What passenger temperature should I set?",
+                reason="passenger_comfort_match_temperature_disambiguation",
+            )
+
+        if not comfort.temperature_set:
+            if not tool_index.has("set_climate_temperature"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the passenger temperature because that control is unavailable right now.",
+                    reason="passenger_comfort_match_missing_temperature_tool",
+                )
+            temperature_args = tool_index.arg_names("set_climate_temperature")
+            if "seat_zone" not in temperature_args or "temperature" not in temperature_args:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the passenger temperature because the required temperature controls are unavailable right now.",
+                    reason="passenger_comfort_match_missing_temperature_parameter",
+                )
+            return NextAction.tool_call(
+                "set_climate_temperature",
+                {
+                    "seat_zone": "PASSENGER",
+                    "temperature": comfort.target_temperature,
+                },
+                reason="passenger_comfort_match_set_temperature",
+            )
+
+        if not comfort.seat_heating_checked:
+            if not tool_index.has("get_seat_heating_level"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't check the driver's current seat heating level, so I can't match the passenger seat heating to it.",
+                    reason="passenger_comfort_match_missing_seat_heating_check",
+                )
+            return NextAction.tool_call(
+                "get_seat_heating_level",
+                reason="passenger_comfort_match_seat_heating_check",
+            )
+
+        if comfort.driver_heating_level is None:
+            comfort.completed = True
+            return NextAction.respond(
+                "I can't determine the driver's current seat heating level from the available tool result.",
+                reason="passenger_comfort_match_missing_driver_heating_result",
+            )
+
+        if not comfort.passenger_heating_set:
+            if not tool_index.has("set_seat_heating"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the passenger seat heating because that control is unavailable right now.",
+                    reason="passenger_comfort_match_missing_seat_heating_tool",
+                )
+            seat_args = tool_index.arg_names("set_seat_heating")
+            if "seat_zone" not in seat_args:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the passenger seat heating because the seat selector is unavailable right now, so I can't safely complete matching the steering wheel heating to that applied level.",
+                    reason="passenger_comfort_match_missing_seat_zone_parameter",
+                )
+            if "level" not in seat_args:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the passenger seat heating because the heating level control is unavailable right now.",
+                    reason="passenger_comfort_match_missing_level_parameter",
+                )
+            return NextAction.tool_call(
+                "set_seat_heating",
+                {"seat_zone": "PASSENGER", "level": comfort.driver_heating_level},
+                reason="passenger_comfort_match_set_passenger_heating",
+            )
+
+        if not comfort.steering_wheel_set:
+            if not tool_index.has("set_steering_wheel_heating"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't adjust the steering wheel heating because that control is unavailable right now.",
+                    reason="passenger_comfort_match_missing_steering_tool",
+                )
+            if not _tool_argument_available(
+                tool_index, "set_steering_wheel_heating", "level"
+            ):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't adjust the steering wheel heating because the required level control is unavailable right now.",
+                    reason="passenger_comfort_match_missing_steering_level_parameter",
+                )
+            return NextAction.tool_call(
+                "set_steering_wheel_heating",
+                {"level": comfort.driver_heating_level},
+                reason="passenger_comfort_match_set_steering_wheel_heating",
+            )
+
         comfort.completed = True
         return NextAction.respond(
-            "Done, I set the cabin temperature to "
-            f"{_format_temperature_target(comfort.target_temperature)} "
-            "and adjusted seat heating for the occupied seats.",
-            reason="occupancy_comfort_done",
+            "Done, I set the passenger temperature, matched passenger seat heating to the driver side, and matched the steering wheel heating to that level.",
+            reason="passenger_comfort_match_done",
         )
 
     def _next_driver_comfort_temperature_action(
@@ -5888,6 +6181,14 @@ def _is_occupancy_comfort_request(text: str) -> bool:
             "unoccupied seats",
             "empty seat",
             "empty seats",
+            "where people are sitting",
+            "where people are seated",
+            "where someone is sitting",
+            "where someone is seated",
+            "where anyone is sitting",
+            "where anyone is seated",
+            "people are sitting",
+            "people are seated",
         )
     ):
         return False
@@ -5904,7 +6205,33 @@ def _is_occupancy_comfort_request(text: str) -> bool:
     )
 
 
+def _is_passenger_comfort_match_request(text: str) -> bool:
+    if "passenger" not in text or "driver" not in text:
+        return False
+    if not _mentions_seat_heating(text):
+        return False
+    if not _mentions_temperature_setting(text):
+        return False
+    return bool(
+        "match" in text
+        or "same level" in text
+        or "same as" in text
+        or "driver side comfort" in text
+    )
+
+
 def _is_driver_comfort_temperature_request(text: str) -> bool:
+    if _requests_passenger_heating_off(text) and any(
+        phrase in text
+        for phrase in (
+            "my temperature",
+            "my comfort level",
+            "comfort temperature",
+            "driver comfort",
+            "just me",
+        )
+    ):
+        return True
     if not (
         "driver zone temperature" in text
         or "driver temperature" in text
@@ -8058,6 +8385,52 @@ def _extract_heating_level(text: str) -> int | None:
     return None
 
 
+def _extract_steering_wheel_heating_level(text: str) -> int | None:
+    if "steering wheel" not in text:
+        return None
+    match = re.search(r"steering wheel[^.?!,;]*?\blevel\s*([0-3])\b", text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"\blevel\s*([0-3])\b[^.?!,;]*?steering wheel", text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _extract_seat_heating_target_level(text: str) -> int | None:
+    if not _mentions_seat_heating(text):
+        return None
+    if _extract_heating_delta(text) is not None:
+        return None
+    match = re.search(r"seat heating[^.?!,;]*?\blevel\s*([0-3])\b", text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"\blevel\s*([0-3])\b[^.?!,;]*?seat heating", text)
+    if match:
+        return int(match.group(1))
+    if "steering wheel" in text:
+        return None
+    return _extract_heating_level(text)
+
+
+def _extract_heating_delta(text: str) -> int | None:
+    if not _mentions_seat_heating(text) and "seat" not in text:
+        return None
+    if not re.search(r"\b(increase|raise|bump|boost|up)\b", text):
+        return None
+
+    match = re.search(r"\b(?:by|up)\s+([1-3])\s+levels?\b", text)
+    if match:
+        return int(match.group(1))
+
+    word_numbers = {"one": 1, "two": 2, "three": 3}
+    match = re.search(r"\b(?:by|up)\s+(one|two|three)\s+levels?\b", text)
+    if match:
+        return word_numbers[match.group(1)]
+
+    return None
+
+
 def _extract_reading_light_position(text: str) -> str | None:
     if "driver rear" in text or "rear driver" in text or "left rear" in text:
         return "DRIVER_REAR"
@@ -8567,6 +8940,26 @@ def _seat_heating_zone_for_occupied_front_seats(
     if passenger:
         return "PASSENGER"
     return None
+
+
+def _occupied_front_seat_heating_target(comfort: OccupancyComfortFlow) -> int | None:
+    if comfort.heating_delta is None:
+        return comfort.target_heating_level
+
+    occupied_levels: list[int] = []
+    if comfort.seats_occupied.get("driver") is True:
+        if comfort.seat_heating_driver is None:
+            return None
+        occupied_levels.append(comfort.seat_heating_driver)
+    if comfort.seats_occupied.get("passenger") is True:
+        if comfort.seat_heating_passenger is None:
+            return None
+        occupied_levels.append(comfort.seat_heating_passenger)
+
+    if not occupied_levels:
+        return None
+
+    return max(0, min(3, max(occupied_levels) + comfort.heating_delta))
 
 
 def _bounded_percentage(value: Any) -> int | None:
