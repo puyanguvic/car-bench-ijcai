@@ -419,13 +419,22 @@ class RouteEnergyFlow:
     wants_charger_search: bool = False
     search_mode: Literal["nearby", "along_route"] | None = None
     at_kilometer: float | None = None
+    search_kilometers: list[int] = field(default_factory=list)
+    search_kilometer_index: int = 0
     filters: list[str] = field(default_factory=list)
+    poi_search_category: str | None = None
     pois_checked: bool = False
     pois: list[dict[str, Any]] = field(default_factory=list)
     selected_poi_id: str | None = None
     selected_poi_name: str | None = None
     selected_plug_id: str | None = None
     selected_phone_number: str | None = None
+    companion_poi_category: str | None = None
+    companion_poi_filters: list[str] = field(default_factory=list)
+    companion_pois_checked: bool = False
+    companion_pois: list[dict[str, Any]] = field(default_factory=list)
+    arrival_window_start_minutes: int | None = None
+    arrival_window_end_minutes: int | None = None
     wants_charging_time: bool = False
     target_soc: float | None = None
     start_soc_for_charging: float | None = None
@@ -1470,6 +1479,19 @@ class PolicyAwareController:
             _hydrate_route_energy_from_recent(state.route_energy, state)
             if (
                 state.route_energy.selected_poi_id is None
+                and state.recent_charging_pois
+            ):
+                selected = _select_poi_from_text(state.recent_charging_pois, text)
+                if selected is not None:
+                    state.route_energy.pois = list(state.recent_charging_pois)
+                    state.route_energy.pois_checked = True
+                    state.route_energy.route_id = state.recent_charging_route_id
+                    state.route_energy.at_kilometer = (
+                        state.recent_charging_at_kilometer
+                    )
+                    _record_route_energy_selected_poi(state.route_energy, selected)
+            if (
+                state.route_energy.selected_poi_id is None
                 and state.route_energy.pois
             ):
                 selected = _select_poi_from_text(state.route_energy.pois, text)
@@ -2344,22 +2366,48 @@ class PolicyAwareController:
             elif name == "search_poi_along_the_route":
                 if state.route_energy.active:
                     charging = state.route_energy
-                    charging.pois_checked = True
+                    poi_category = charging.poi_search_category
                     if isinstance(result, dict) and isinstance(
                         result.get("pois_found_along_route"), list
                     ):
-                        charging.pois = [
+                        pois = [
                             poi
                             for poi in result["pois_found_along_route"]
                             if isinstance(poi, dict)
                         ]
+                    else:
+                        pois = []
+
+                    if (
+                        poi_category is not None
+                        and poi_category == charging.companion_poi_category
+                    ):
+                        charging.companion_pois_checked = True
+                        charging.companion_pois = (
+                            _filter_companion_pois_for_route_constraints(
+                                charging, state, pois
+                            )
+                        )
+                        if (
+                            not charging.companion_pois
+                            and not _advance_route_energy_search_kilometer(charging)
+                        ):
+                            label = _friendly_poi_category(poi_category)
+                            charging.failure_message = (
+                                f"I couldn't find matching {label} near a charging stop on the route."
+                            )
+                    else:
+                        charging.pois_checked = True
+                        charging.pois = pois
                         state.recent_charging_pois = list(charging.pois)
                         state.recent_charging_route_id = charging.route_id
                         state.recent_charging_at_kilometer = charging.at_kilometer
-                    if not charging.pois:
-                        charging.failure_message = (
-                            "I couldn't find matching charging stations along the route."
-                        )
+                        if not charging.pois:
+                            if not _advance_route_energy_search_kilometer(charging):
+                                charging.failure_message = (
+                                    "I couldn't find matching charging stations along the route."
+                                )
+                    charging.poi_search_category = None
             elif name == "calculate_charging_time_by_soc":
                 if state.route_energy.active:
                     charging = state.route_energy
@@ -4704,6 +4752,101 @@ class PolicyAwareController:
                 reason="route_energy_navigation_missing_destination",
             )
 
+        if charging.selected_poi_id is None and (
+            charging.wants_charger_search or charging.companion_poi_category
+        ):
+            route_action = self._prepare_route_energy_route(charging, state, tool_index)
+            if route_action is not None:
+                return route_action
+
+            if charging.route_id is None:
+                return NextAction.respond(
+                    "I need a route before I can select a charging stop.",
+                    reason="route_energy_navigation_missing_route_for_stop",
+                )
+
+            _ensure_route_energy_search_kilometers(charging, state)
+            if charging.at_kilometer is None and charging.search_kilometers:
+                charging.at_kilometer = charging.search_kilometers[
+                    charging.search_kilometer_index
+                ]
+            if charging.at_kilometer is None:
+                return NextAction.respond(
+                    "At about what distance along the route should I search for the charging stop?",
+                    reason="route_energy_navigation_missing_route_position",
+                )
+
+            if (
+                charging.companion_poi_category
+                and not charging.companion_pois_checked
+            ):
+                if not tool_index.has("search_poi_along_the_route"):
+                    label = _friendly_poi_category(charging.companion_poi_category)
+                    return NextAction.respond(
+                        f"I can't search for {label} along the route because that search capability is unavailable right now.",
+                        reason="route_energy_navigation_missing_companion_poi_tool",
+                    )
+                arguments: dict[str, Any] = {
+                    "category_poi": charging.companion_poi_category,
+                    "route_id": charging.route_id,
+                    "at_kilometer": _json_number(charging.at_kilometer),
+                }
+                if (
+                    charging.companion_poi_filters
+                    and charging.arrival_window_start_minutes is None
+                    and _tool_argument_available(
+                        tool_index, "search_poi_along_the_route", "filters"
+                    )
+                ):
+                    arguments["filters"] = charging.companion_poi_filters
+                charging.poi_search_category = charging.companion_poi_category
+                return NextAction.tool_call(
+                    "search_poi_along_the_route",
+                    arguments,
+                    reason="route_energy_navigation_companion_poi_search",
+                )
+
+            if (
+                charging.companion_poi_category
+                and charging.companion_pois_checked
+                and not charging.companion_pois
+            ):
+                if _advance_route_energy_search_kilometer(charging):
+                    return self._next_route_energy_navigation_setup_action(
+                        charging, state, tool_index
+                    )
+                label = _friendly_poi_category(charging.companion_poi_category)
+                return NextAction.respond(
+                    f"I couldn't find matching {label} near a charging stop on the route.",
+                    reason="route_energy_navigation_no_companion_poi",
+                )
+
+            if not charging.pois_checked:
+                if not tool_index.has("search_poi_along_the_route"):
+                    return NextAction.respond(
+                        "I can't search for charging stations along the route because that search capability is unavailable right now.",
+                        reason="route_energy_navigation_missing_along_route_poi_tool",
+                    )
+                arguments: dict[str, Any] = {
+                    "category_poi": "charging_stations",
+                    "route_id": charging.route_id,
+                    "at_kilometer": _json_number(charging.at_kilometer),
+                }
+                if charging.filters and _tool_argument_available(
+                    tool_index, "search_poi_along_the_route", "filters"
+                ):
+                    arguments["filters"] = charging.filters
+                charging.poi_search_category = "charging_stations"
+                return NextAction.tool_call(
+                    "search_poi_along_the_route",
+                    arguments,
+                    reason="route_energy_navigation_charging_stop_search",
+                )
+
+            selected = _select_route_energy_charging_option(charging)
+            if selected is not None:
+                _record_route_energy_selected_poi(charging, selected)
+
         if charging.selected_poi_id is None:
             selected = _select_route_energy_charging_option(charging)
             if selected is not None:
@@ -4802,7 +4945,9 @@ class PolicyAwareController:
                 reason="route_energy_navigation_missing_set_tool",
             )
 
-        charging.completion_message = "Done, navigation is started with the charging stop."
+        charging.completion_message = _format_route_energy_navigation_completion(
+            charging, route_to_poi, route_from_poi
+        )
         return NextAction.tool_call(
             "set_new_navigation",
             {"route_ids": [route_to_poi_id, route_from_poi_id]},
@@ -7419,7 +7564,22 @@ def _is_route_energy_request(text: str) -> bool:
     if (
         "charging station stop" in text
         and re.search(r"\b(set up|start)\s+navigation\b", text)
-        and not any(term in text for term in ("battery", "range", "along", "around"))
+        and not any(
+            term in text
+            for term in (
+                "battery",
+                "range",
+                "along",
+                "around",
+                "on the way",
+                "fast food",
+                "eat",
+                "open",
+                "dinner",
+                "lunch",
+                "between",
+            )
+        )
     ):
         return False
 
@@ -7435,6 +7595,81 @@ def _is_route_energy_request(text: str) -> bool:
         or "charging station" in text
         or "charger" in text
     )
+
+
+def _companion_poi_category_for_charging_stop(text: str) -> str | None:
+    if not (
+        any(
+            phrase in text
+            for phrase in ("charging station", "charging stop", "charger")
+        )
+        and re.search(r"\b(navigation|route|navigate|set up|start)\b", text)
+    ):
+        return None
+
+    explicit_categories: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("fast_food", ("fast food", "burger", "drive-through", "drive through")),
+        ("restaurants", ("restaurant", "restaurants")),
+        ("supermarkets", ("supermarket", "grocery", "groceries")),
+        ("public_toilets", ("toilet", "toilets", "restroom", "bathroom")),
+        ("bakery", ("bakery", "bakeries")),
+        ("parking", ("parking", "car park")),
+        ("airports", ("airport", "airports")),
+    )
+    for category, terms in explicit_categories:
+        if any(term in text for term in terms):
+            return category
+
+    if any(term in text for term in ("eat", "meal", "dinner", "lunch")):
+        return "restaurants"
+    return None
+
+
+def _extract_time_window_minutes(text: str) -> tuple[int, int] | None:
+    match = re.search(
+        r"\bbetween\s+"
+        r"(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?)"
+        r"\s+(?:and|to|-)\s+"
+        r"(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?)",
+        text,
+    )
+    if not match:
+        return None
+
+    end = _parse_clock_time_minutes(match.group(2))
+    start = _parse_clock_time_minutes(match.group(1), reference=end)
+    if start is None or end is None:
+        return None
+    return start, end
+
+
+def _parse_clock_time_minutes(value: str, reference: int | None = None) -> int | None:
+    text = value.strip().lower().replace(".", "")
+    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+    if not match:
+        return None
+
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    if minute > 59:
+        return None
+
+    suffix = match.group(3)
+    if suffix:
+        if hour < 1 or hour > 12:
+            return None
+        if suffix == "pm" and hour != 12:
+            hour += 12
+        elif suffix == "am" and hour == 12:
+            hour = 0
+    elif hour <= 12 and reference is not None:
+        ref_hour = reference // 60
+        if ref_hour >= 12 and hour < 12:
+            hour += 12
+    elif hour > 23:
+        return None
+
+    return hour * 60 + minute
 
 
 def _is_recent_charging_stop_navigation_request(
@@ -7552,6 +7787,30 @@ def _update_route_energy_from_text(flow: RouteEnergyFlow, text: str) -> None:
     if _is_route_energy_navigation_setup_request(lowered):
         flow.wants_navigation_setup = True
         flow.search_mode = None
+        if "charging station" in lowered or "charging stop" in lowered or "charger" in lowered:
+            flow.wants_charger_search = True
+            flow.search_mode = "along_route"
+
+    companion_category = _companion_poi_category_for_charging_stop(lowered)
+    if companion_category is not None:
+        flow.companion_poi_category = companion_category
+        flow.wants_charger_search = True
+        flow.search_mode = "along_route"
+        time_window = _extract_time_window_minutes(lowered)
+        if time_window is None and "dinner" in lowered:
+            time_window = (19 * 60, 21 * 60)
+        elif time_window is None and "lunch" in lowered:
+            time_window = (12 * 60, 14 * 60)
+        if time_window is not None:
+            (
+                flow.arrival_window_start_minutes,
+                flow.arrival_window_end_minutes,
+            ) = time_window
+        if any(
+            marker in lowered
+            for marker in ("open", "dinner", "lunch", "between", "7 pm", "19:")
+        ):
+            flow.companion_poi_filters = ["any::currently_open"]
 
     if "final destination" in lowered or "longer journey" in lowered:
         flow.route_selection = "last_segment"
@@ -8112,6 +8371,175 @@ def _route_energy_selected_route_distance(flow: RouteEnergyFlow) -> float | None
     return None
 
 
+def _route_energy_default_search_kilometer(flow: RouteEnergyFlow) -> float | None:
+    distance = _route_energy_selected_route_distance(flow)
+    if distance is None or distance <= 0:
+        return None
+    return int(round(distance / 2.0))
+
+
+def _route_energy_selected_route_duration_minutes(flow: RouteEnergyFlow) -> int | None:
+    route = _route_energy_selected_route(flow)
+    if route is None:
+        return None
+    hours = _safe_int(route.get("duration_hours"), 0) or 0
+    minutes = _safe_int(route.get("duration_minutes"), 0) or 0
+    total = hours * 60 + minutes
+    return total if total > 0 else None
+
+
+def _ensure_route_energy_search_kilometers(
+    flow: RouteEnergyFlow, state: ControllerState
+) -> None:
+    if flow.search_kilometers:
+        return
+    if flow.at_kilometer is not None:
+        flow.search_kilometers = [int(round(flow.at_kilometer))]
+    else:
+        flow.search_kilometers = _route_energy_time_window_search_kilometers(
+            flow, state
+        )
+    if not flow.search_kilometers:
+        default_km = _route_energy_default_search_kilometer(flow)
+        if default_km is not None:
+            flow.search_kilometers = [int(default_km)]
+    if flow.search_kilometers:
+        flow.search_kilometer_index = min(
+            max(flow.search_kilometer_index, 0), len(flow.search_kilometers) - 1
+        )
+        flow.at_kilometer = flow.search_kilometers[flow.search_kilometer_index]
+
+
+def _route_energy_time_window_search_kilometers(
+    flow: RouteEnergyFlow, state: ControllerState
+) -> list[int]:
+    if (
+        flow.arrival_window_start_minutes is None
+        or flow.arrival_window_end_minutes is None
+        or state.runtime.hour is None
+    ):
+        return []
+    distance = _route_energy_selected_route_distance(flow)
+    duration_minutes = _route_energy_selected_route_duration_minutes(flow)
+    if distance is None or distance <= 0 or not duration_minutes:
+        return []
+
+    current_minutes = state.runtime.hour * 60 + (state.runtime.minute or 0)
+    start_delta = _minutes_until(current_minutes, flow.arrival_window_start_minutes)
+    end_delta = _minutes_until(current_minutes, flow.arrival_window_end_minutes)
+    if end_delta < start_delta:
+        end_delta += 24 * 60
+    if start_delta > duration_minutes:
+        return []
+
+    start_ratio = max(0.0, min(1.0, start_delta / duration_minutes))
+    end_ratio = max(start_ratio, min(1.0, end_delta / duration_minutes))
+    start_km = distance * start_ratio
+    end_km = distance * end_ratio
+    return _route_energy_candidate_kilometers(start_km, end_km, distance)
+
+
+def _minutes_until(current_minutes: int, target_minutes: int) -> int:
+    delta = target_minutes - current_minutes
+    if delta < 0:
+        delta += 24 * 60
+    return delta
+
+
+def _route_energy_candidate_kilometers(
+    start_km: float, end_km: float, route_distance_km: float
+) -> list[int]:
+    step = 50
+    start = int(round(start_km / step) * step)
+    end = int(round(end_km / step) * step)
+    lower = max(1, min(start, end))
+    upper = min(int(route_distance_km), max(start, end))
+    if upper < lower:
+        return [max(1, min(int(route_distance_km), lower))]
+    candidates = list(range(lower, upper + 1, step))
+    for point in (start, end):
+        bounded = max(1, min(int(route_distance_km), point))
+        if bounded not in candidates:
+            candidates.append(bounded)
+    return sorted(candidates)
+
+
+def _advance_route_energy_search_kilometer(flow: RouteEnergyFlow) -> bool:
+    if not flow.search_kilometers:
+        return False
+    next_index = flow.search_kilometer_index + 1
+    if next_index >= len(flow.search_kilometers):
+        return False
+    flow.search_kilometer_index = next_index
+    flow.at_kilometer = flow.search_kilometers[next_index]
+    flow.pois_checked = False
+    flow.pois = []
+    flow.companion_pois_checked = False
+    flow.companion_pois = []
+    flow.selected_poi_id = None
+    flow.selected_poi_name = None
+    flow.selected_plug_id = None
+    flow.selected_phone_number = None
+    return True
+
+
+def _filter_companion_pois_for_route_constraints(
+    flow: RouteEnergyFlow, state: ControllerState, pois: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not pois:
+        return []
+    if (
+        flow.arrival_window_start_minutes is None
+        or state.runtime.hour is None
+        or flow.at_kilometer is None
+    ):
+        return pois
+    arrival_minutes = _route_energy_arrival_minutes_at_kilometer(flow, state)
+    if arrival_minutes is None:
+        return pois
+    return [poi for poi in pois if _poi_open_at_minutes(poi, arrival_minutes)]
+
+
+def _route_energy_arrival_minutes_at_kilometer(
+    flow: RouteEnergyFlow, state: ControllerState
+) -> int | None:
+    distance = _route_energy_selected_route_distance(flow)
+    duration_minutes = _route_energy_selected_route_duration_minutes(flow)
+    if (
+        distance is None
+        or distance <= 0
+        or duration_minutes is None
+        or flow.at_kilometer is None
+        or state.runtime.hour is None
+    ):
+        return None
+    current_minutes = state.runtime.hour * 60 + (state.runtime.minute or 0)
+    elapsed = int(round(duration_minutes * (flow.at_kilometer / distance)))
+    return (current_minutes + elapsed) % (24 * 60)
+
+
+def _poi_open_at_minutes(poi: dict[str, Any], target_minutes: int) -> bool:
+    opening_hours = _format_opening_hours(
+        poi.get("opening_hours") or poi.get("opening_times") or poi.get("hours")
+    )
+    if not opening_hours:
+        return False
+    match = re.search(
+        r"(\d{1,2}):(\d{2})\s*h?\s*-\s*(\d{1,2}):(\d{2})\s*h?",
+        opening_hours,
+    )
+    if not match:
+        return False
+    open_minutes = int(match.group(1)) * 60 + int(match.group(2))
+    close_hour = int(match.group(3))
+    close_minutes = min(close_hour, 23) * 60 + int(match.group(4))
+    if close_hour == 24:
+        close_minutes = 24 * 60 - 1
+    if close_minutes < open_minutes:
+        return target_minutes >= open_minutes or target_minutes <= close_minutes
+    return open_minutes <= target_minutes <= close_minutes
+
+
 def _route_energy_selected_route(flow: RouteEnergyFlow) -> dict[str, Any] | None:
     if not flow.routes:
         return None
@@ -8195,6 +8623,32 @@ def _format_route_energy_completion(flow: RouteEnergyFlow) -> str:
             return f"You can drive about {flow.distance_km:g} km for that battery range."
         return "I checked the driving distance for that battery range."
     return "Done, I checked the route and charging information."
+
+
+def _format_route_energy_navigation_completion(
+    flow: RouteEnergyFlow,
+    route_to_poi: dict[str, Any],
+    route_from_poi: dict[str, Any],
+) -> str:
+    selected_fastest = _route_has_alias(route_to_poi, "fastest") and _route_has_alias(
+        route_from_poi, "fastest"
+    )
+    if selected_fastest:
+        message = (
+            "Done, I started navigation using the fastest available route with the "
+            "charging stop."
+        )
+    else:
+        message = "Done, navigation is started with the charging stop."
+
+    has_alternatives = (
+        len(flow.routes_to_poi) > 1
+        or len(flow.routes_from_poi) > 1
+        or len(flow.routes) > 1
+    )
+    if has_alternatives:
+        message += " Would you like more information on the alternative routes?"
+    return message
 
 
 def _format_current_route_energy_summary(flow: RouteEnergyFlow) -> str | None:

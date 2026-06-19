@@ -29,14 +29,16 @@ def tool_result(tool_name: str, result: dict) -> dict:
     }
 
 
-def system_messages(location_id: str = "loc_origin") -> list[dict]:
+def system_messages(
+    location_id: str = "loc_origin", *, hour: int = 10, minute: int = 0
+) -> list[dict]:
     return [
         {
             "role": "system",
             "content": (
                 f'CURRENT_LOCATION = {{"id": "{location_id}", "name": "Origin"}}\n'
                 'DATETIME = {"year": 2026, "month": 6, "day": 17, '
-                '"hour": 10, "minute": 0}'
+                f'"hour": {hour}, "minute": {minute}}}'
             ),
         }
     ]
@@ -163,6 +165,19 @@ def charging_station_result() -> dict:
                         "availability": "available",
                     },
                 ],
+            }
+        ]
+    }
+
+
+def fast_food_result() -> dict:
+    return {
+        "pois_found_along_route": [
+            {
+                "id": "poi_fast_alpha",
+                "name": "Quick Burger",
+                "category": "fast_food",
+                "opening_hours": "08:00h - 22:00h",
             }
         ]
     }
@@ -961,6 +976,175 @@ def test_route_energy_sets_navigation_with_recent_charging_stop() -> None:
                     "route_origin_charge_fast",
                     "route_charge_harbor_second",
                 ]
+            },
+        }
+    ]
+
+
+def test_route_energy_sets_navigation_with_food_verified_charging_stop() -> None:
+    controller = PolicyAwareController()
+    tools = route_energy_tools(include_route_lookup=True) + [
+        fake_tool(
+            "set_new_navigation",
+            {"route_ids": {"type": "array"}},
+            ["route_ids"],
+        )
+    ]
+    messages = system_messages(location_id="loc_origin", hour=17, minute=0)
+
+    action = controller.decide(
+        context_id="ctx-food-charging-stop",
+        messages=messages,
+        tools=tools,
+        latest_user_text=(
+            "Set up navigation to Northport. I need a charging station "
+            "stop on the way between 6 PM and 6:10 PM where I can eat fast food "
+            "that's open."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_location_id_by_location_name",
+            "arguments": {"location": "Northport"},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-food-charging-stop",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_location_id_by_location_name", {"id": "loc_northport"})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_routes_from_start_to_destination",
+            "arguments": {
+                "start_id": "loc_origin",
+                "destination_id": "loc_northport",
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-food-charging-stop",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {
+                    "routes": [
+                        {
+                            "route_id": "route_origin_northport_fast",
+                            "distance_km": 300.0,
+                            "duration_hours": 3,
+                            "duration_minutes": 0,
+                            "alias": ["fastest", "first"],
+                        },
+                        {
+                            "route_id": "route_origin_northport_second",
+                            "distance_km": 320.0,
+                            "alias": ["second"],
+                        },
+                    ]
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "search_poi_along_the_route",
+            "arguments": {
+                "category_poi": "fast_food",
+                "route_id": "route_origin_northport_fast",
+                "at_kilometer": 100,
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-food-charging-stop",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("search_poi_along_the_route", fast_food_result())
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "search_poi_along_the_route",
+            "arguments": {
+                "category_poi": "charging_stations",
+                "route_id": "route_origin_northport_fast",
+                "at_kilometer": 100,
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-food-charging-stop",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("search_poi_along_the_route", charging_station_result())
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_routes_from_start_to_destination",
+            "arguments": {
+                "start_id": "loc_origin",
+                "destination_id": "poi_charge_alpha",
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-food-charging-stop",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {"routes": [{"route_id": "route_origin_charge", "alias": ["fastest"]}]},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_routes_from_start_to_destination",
+            "arguments": {
+                "start_id": "poi_charge_alpha",
+                "destination_id": "loc_northport",
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-food-charging-stop",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {"routes": [{"route_id": "route_charge_northport", "alias": ["fastest"]}]},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "set_new_navigation",
+            "arguments": {
+                "route_ids": ["route_origin_charge", "route_charge_northport"]
             },
         }
     ]
