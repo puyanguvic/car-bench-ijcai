@@ -16,10 +16,63 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .flows import (
+    AirCirculationFlow,
+    AirConditioningFlow,
+    AirQualityFlow,
+    AmbientLightFlow,
+    CabinTemperatureFlow,
+    ClimateEnergyInspectionFlow,
+    ClimateInspectionFlow,
+    ControllerState,
+    DefrostFlow,
+    DriverComfortTemperatureFlow,
+    EmailFlow,
+    FanSpeedFlow,
+    FogLightFlow,
+    HighBeamFlow,
+    MultiStopNavigationFlow,
+    NavigationFlow,
+    OccupancyComfortFlow,
+    POIFlow,
+    PassengerComfortMatchFlow,
+    ReadingLightFlow,
+    ReadingLightOccupancyFlow,
+    RouteEnergyFlow,
+    RuntimeContext,
+    SteeringWheelHeatingFlow,
+    SunroofFlow,
+    SunshadeFlow,
+    TrunkFlow,
+    WindowFlow,
+    WindowMatchFlow,
+)
+from .poi_renderer import (
+    _extract_poi_category,
+    _format_poi_choice_prompt,
+    _friendly_poi_category,
+    _poi_category_from_text,
+    _poi_open_at_minutes,
+)
 from .response_renderer import (
     clean_user_content,
     render_malformed_tool_arguments,
     render_malformed_tool_call,
+)
+from .route_renderer import (
+    _format_route_alternative_detail_prompt,
+    _format_route_choice_prompt,
+    _navigation_completion_message,
+    _navigation_multi_route_completion_message,
+    _route_choice_is_unambiguous,
+    _route_choice_label,
+    _route_duration_minutes,
+    _route_has_alias,
+    _route_summary,
+    _route_toll_notice_parts,
+    _select_requested_route,
+    _select_route,
+    _select_toll_aware_route,
 )
 from .tool_index import ToolIndex
 
@@ -57,599 +110,6 @@ class NextAction:
             reason=reason,
         )
 
-
-@dataclass
-class RuntimeContext:
-    location_id: str | None = None
-    month: int | None = None
-    day: int | None = None
-    hour: int | None = None
-    minute: int | None = None
-
-
-@dataclass
-class SunroofFlow:
-    active: bool = False
-    target_percentage: int | None = None
-    requested_close: bool = False
-    position_checked: bool = False
-    weather_checked: bool = False
-    preferences_checked: bool = False
-    weather_confirmation_requested: bool = False
-    weather_confirmed: bool = False
-    sunroof_position: float | None = None
-    sunshade_position: float | None = None
-    weather_condition: str | None = None
-    completed: bool = False
-
-
-@dataclass
-class SunshadeFlow:
-    active: bool = False
-    target_percentage: int | None = None
-    completed: bool = False
-
-
-@dataclass
-class WindowFlow:
-    active: bool = False
-    window: str = "ALL"
-    target_percentage: int | None = None
-    climate_checked: bool = False
-    ac_on: bool | None = None
-    ac_confirmation_requested: bool = False
-    ac_confirmed: bool = False
-    completed: bool = False
-
-
-@dataclass
-class WindowMatchFlow:
-    active: bool = False
-    reference_window: Literal["FRONT", "PASSENGER_REAR"] = "FRONT"
-    all_windows: bool = False
-    followup_defrost_window: Literal["ALL", "FRONT", "REAR"] | None = None
-    windows_checked: bool = False
-    window_driver_position: int | None = None
-    window_passenger_position: int | None = None
-    window_driver_rear_position: int | None = None
-    window_passenger_rear_position: int | None = None
-    completed: bool = False
-
-
-@dataclass
-class AmbientLightFlow:
-    active: bool = False
-    target_color: str | None = None
-    on: bool = True
-    match_car_color: bool = False
-    car_color_checked: bool = False
-    preferences_checked: bool = False
-    completed: bool = False
-
-
-@dataclass
-class TrunkFlow:
-    active: bool = False
-    action: Literal["OPEN", "CLOSE"] = "OPEN"
-    confirmation_requested: bool = False
-    confirmed: bool = False
-    completed: bool = False
-
-
-@dataclass
-class AirCirculationFlow:
-    active: bool = False
-    mode: Literal["FRESH_AIR", "RECIRCULATION", "AUTO"] | None = None
-    preferences_checked: bool = False
-    combined_with_air_conditioning: bool = False
-    combined_fan_level: int | None = None
-    combined_window: str | None = None
-    combined_window_percentage: int | None = None
-    completed: bool = False
-
-
-@dataclass
-class AirConditioningFlow:
-    active: bool = False
-    on: bool = True
-    fan_target_level: int | None = None
-    climate_checked: bool = False
-    windows_checked: bool = False
-    preserve_open_windows: bool = False
-    fan_speed: int | None = None
-    air_conditioning: bool | None = None
-    closed_windows_for_ac: bool = False
-    window_driver_position: int | None = None
-    window_passenger_position: int | None = None
-    window_driver_rear_position: int | None = None
-    window_passenger_rear_position: int | None = None
-    completed: bool = False
-
-
-@dataclass
-class AirQualityFlow:
-    active: bool = False
-    climate_checked: bool = False
-    fan_speed: int | None = None
-
-
-@dataclass
-class FanSpeedFlow:
-    active: bool = False
-    level: int | None = None
-    query_current: bool = False
-    current_checked: bool = False
-    current_level: int | None = None
-    preferences_checked: bool = False
-    completed: bool = False
-
-
-@dataclass
-class CabinTemperatureFlow:
-    active: bool = False
-    target_temperature: float | None = None
-    seat_zone: Literal["ALL_ZONES", "DRIVER", "PASSENGER"] = "ALL_ZONES"
-    completed: bool = False
-
-
-@dataclass
-class SteeringWheelHeatingFlow:
-    active: bool = False
-    level: int | None = None
-    preferences_checked: bool = False
-    completed: bool = False
-
-
-@dataclass
-class ClimateInspectionFlow:
-    active: bool = False
-    needs_temperature: bool = True
-    needs_seat_heating: bool = False
-    temperature_checked: bool = False
-    seat_heating_checked: bool = False
-    driver_temperature: float | None = None
-    passenger_temperature: float | None = None
-    temperature_unit: str = "Celsius"
-    seat_heating_driver: int | None = None
-    seat_heating_passenger: int | None = None
-    completed: bool = False
-
-
-@dataclass
-class ClimateEnergyInspectionFlow:
-    active: bool = False
-    climate_checked: bool = False
-    seats_checked: bool = False
-    fan_speed: int | None = None
-    fan_airflow_direction: str | None = None
-    air_conditioning: bool | None = None
-    air_circulation: str | None = None
-    window_front_defrost: bool | None = None
-    window_rear_defrost: bool | None = None
-    seats_occupied: dict[str, bool] = field(default_factory=dict)
-    completed: bool = False
-
-
-@dataclass
-class OccupancyComfortFlow:
-    active: bool = False
-    seats_checked: bool = False
-    seats_occupied: dict[str, bool] = field(default_factory=dict)
-    needs_temperature: bool = False
-    target_temperature: float | None = None
-    target_temperature_zone: Literal["ALL_ZONES", "DRIVER", "PASSENGER"] = "ALL_ZONES"
-    match_driver_to_passenger_temperature: bool = False
-    temperature_checked: bool = False
-    driver_temperature: float | None = None
-    passenger_temperature: float | None = None
-    target_heating_level: int | None = None
-    heating_delta: int | None = None
-    seat_heating_checked: bool = False
-    seat_heating_driver: int | None = None
-    seat_heating_passenger: int | None = None
-    turn_off_unoccupied: bool = False
-    query_unoccupied_heating_status: bool = False
-    unoccupied_heating_set: bool = False
-    preferences_checked: bool = False
-    steering_wheel_requested: bool = False
-    steering_wheel_level: int | None = None
-    temperature_set: bool = False
-    seat_heating_set: bool = False
-    steering_wheel_set: bool = False
-    completed: bool = False
-
-
-@dataclass
-class DriverComfortTemperatureFlow:
-    active: bool = False
-    passenger_heating_required: bool = False
-    passenger_heating_off: bool = False
-    target_temperature: float | None = None
-    preferences_checked: bool = False
-    temperature_set: bool = False
-    completed: bool = False
-
-
-@dataclass
-class PassengerComfortMatchFlow:
-    active: bool = False
-    target_temperature: float | None = None
-    temperature_set: bool = False
-    seat_heating_checked: bool = False
-    driver_heating_level: int | None = None
-    passenger_heating_level: int | None = None
-    passenger_heating_set: bool = False
-    steering_wheel_set: bool = False
-    completed: bool = False
-
-
-@dataclass
-class ReadingLightFlow:
-    active: bool = False
-    position: str | None = None
-    on: bool = True
-    completed: bool = False
-
-
-@dataclass
-class ReadingLightOccupancyFlow:
-    active: bool = False
-    seats_checked: bool = False
-    seats_occupied: dict[str, bool] = field(default_factory=dict)
-    pending_actions: list[tuple[str, bool]] = field(default_factory=list)
-    completed: bool = False
-
-
-@dataclass
-class NavigationFlow:
-    active: bool = False
-    mode: (
-        Literal[
-            "set_new",
-            "replace_final_destination",
-            "delete_final_destination",
-            "delete_waypoint",
-            "replace_one_waypoint",
-        ]
-        | None
-    ) = None
-    destination_name: str | None = None
-    destination_id: str | None = None
-    route_start_id: str | None = None
-    route_preference: Literal["fastest", "shortest"] | None = None
-    toll_avoidance_tolerance_minutes: int | None = None
-    planning_only: bool = False
-    routes_checked: bool = False
-    routes: list[dict[str, Any]] = field(default_factory=list)
-    route_choice_requested: bool = False
-    route_detail_requested: bool = False
-    selected_route_index: int | None = None
-    current_navigation_checked: bool = False
-    needs_current_navigation: bool = False
-    navigation_active: bool | None = None
-    waypoints_id: list[str] = field(default_factory=list)
-    routes_to_final_destination_id: list[str] = field(default_factory=list)
-    waypoint_details: list[dict[str, Any]] = field(default_factory=list)
-    waypoint_name: str | None = None
-    waypoint_id: str | None = None
-    new_waypoint_name: str | None = None
-    new_waypoint_id: str | None = None
-    route_lookup: (
-        Literal[
-            "destination",
-            "delete_without_waypoint",
-            "to_new_waypoint",
-            "from_new_waypoint",
-        ]
-        | None
-    ) = None
-    route_without_waypoint_checked: bool = False
-    routes_without_waypoint: list[dict[str, Any]] = field(default_factory=list)
-    route_to_new_waypoint_checked: bool = False
-    routes_to_new_waypoint: list[dict[str, Any]] = field(default_factory=list)
-    route_from_new_waypoint_checked: bool = False
-    routes_from_new_waypoint: list[dict[str, Any]] = field(default_factory=list)
-    completion_message: str | None = None
-    completed: bool = False
-    failure_message: str | None = None
-
-
-@dataclass
-class MultiStopNavigationFlow:
-    active: bool = False
-    first_destination_name: str | None = None
-    first_destination_id: str | None = None
-    final_destination_name: str | None = None
-    final_destination_id: str | None = None
-    route_preference: Literal["fastest", "shortest"] | None = None
-    first_routes_checked: bool = False
-    first_routes: list[dict[str, Any]] = field(default_factory=list)
-    final_routes_checked: bool = False
-    final_routes: list[dict[str, Any]] = field(default_factory=list)
-    completion_message: str | None = None
-    completed: bool = False
-    failure_message: str | None = None
-
-
-@dataclass
-class POIFlow:
-    active: bool = False
-    category: str = "restaurants"
-    location_name: str | None = None
-    location_id: str | None = None
-    search_along_route: bool = False
-    route_id: str | None = None
-    route_start_id: str | None = None
-    route_end_id: str | None = None
-    route_prefix_ids: list[str] = field(default_factory=list)
-    route_prefix_selected_routes: list[dict[str, Any]] = field(default_factory=list)
-    route_prefix_considered_routes: list[dict[str, Any]] = field(default_factory=list)
-    route_lookup: Literal["to_poi", "from_poi"] | None = None
-    current_navigation_checked: bool = False
-    required_open_at_minutes: int | None = None
-    pois_checked: bool = False
-    pois: list[dict[str, Any]] = field(default_factory=list)
-    selected_poi_id: str | None = None
-    selected_poi_name: str | None = None
-    routes_checked: bool = False
-    routes: list[dict[str, Any]] = field(default_factory=list)
-    routes_from_poi_checked: bool = False
-    routes_from_poi: list[dict[str, Any]] = field(default_factory=list)
-    route_choice_requested: bool = False
-    route_preference: Literal["fastest", "shortest"] | None = None
-    selected_route_index: int | None = None
-    replace_final_destination: bool = False
-    do_not_set_navigation: bool = False
-    defer_navigation_setup: bool = False
-    completion_message: str | None = None
-    completed: bool = False
-    failure_message: str | None = None
-
-
-@dataclass
-class RouteEnergyFlow:
-    active: bool = False
-    destination_name: str | None = None
-    destination_id: str | None = None
-    route_preference: Literal["fastest", "shortest"] | None = None
-    station_route_preference: Literal["fastest", "shortest"] | None = None
-    route_start_id: str | None = None
-    routes_checked: bool = False
-    routes: list[dict[str, Any]] = field(default_factory=list)
-    route_choice_requested: bool = False
-    route_detail_requested: bool = False
-    selected_route_index: int | None = None
-    final_route_via: str | None = None
-    route_lookup: Literal["destination", "setup_to_poi", "setup_from_poi"] | None = None
-    setup_to_poi_checked: bool = False
-    routes_to_poi: list[dict[str, Any]] = field(default_factory=list)
-    setup_from_poi_checked: bool = False
-    routes_from_poi: list[dict[str, Any]] = field(default_factory=list)
-    current_navigation_checked: bool = False
-    needs_current_navigation: bool = False
-    navigation_active: bool | None = None
-    waypoints_id: list[str] = field(default_factory=list)
-    routes_to_final_destination_id: list[str] = field(default_factory=list)
-    route_details: list[dict[str, Any]] = field(default_factory=list)
-    route_id: str | None = None
-    route_selection: Literal["first_segment", "last_segment", "planned_route"] = (
-        "first_segment"
-    )
-    needs_charging_status: bool = False
-    charging_status_checked: bool = False
-    state_of_charge: float | None = None
-    remaining_range_km: float | None = None
-    wants_range: bool = False
-    wants_current_range: bool = False
-    wants_battery_sufficiency: bool = False
-    wants_stop_count: bool = False
-    wants_navigation_setup: bool = False
-    initial_soc: float | None = None
-    final_soc: float | None = None
-    distance_checked: bool = False
-    distance_km: float | None = None
-    wants_charger_search: bool = False
-    search_mode: Literal["nearby", "along_route"] | None = None
-    at_kilometer: float | None = None
-    search_kilometers: list[int] = field(default_factory=list)
-    search_kilometer_index: int = 0
-    filters: list[str] = field(default_factory=list)
-    poi_search_category: str | None = None
-    pois_checked: bool = False
-    pois: list[dict[str, Any]] = field(default_factory=list)
-    selected_poi_id: str | None = None
-    selected_poi_name: str | None = None
-    selected_plug_id: str | None = None
-    selected_phone_number: str | None = None
-    companion_poi_category: str | None = None
-    companion_poi_filters: list[str] = field(default_factory=list)
-    companion_pois_checked: bool = False
-    companion_pois: list[dict[str, Any]] = field(default_factory=list)
-    arrival_window_start_minutes: int | None = None
-    arrival_window_end_minutes: int | None = None
-    wants_charging_time: bool = False
-    target_soc: float | None = None
-    start_soc_for_charging: float | None = None
-    charging_time_checked: bool = False
-    charging_minutes: float | None = None
-    wants_call: bool = False
-    call_completed: bool = False
-    completion_message: str | None = None
-    completed: bool = False
-    failure_message: str | None = None
-
-
-@dataclass
-class EmailFlow:
-    active: bool = False
-    mode: Literal["meeting_delay", "meeting_attendees", "share_contact"] | None = None
-    recipient_name: str | None = None
-    recipient_first_name: str | None = None
-    recipient_last_name: str | None = None
-    recipient_contact_id: str | None = None
-    recipient_email: str | None = None
-    subject_name: str | None = None
-    subject_first_name: str | None = None
-    subject_last_name: str | None = None
-    subject_contact_id: str | None = None
-    subject_email: str | None = None
-    subject_phone: str | None = None
-    attendee_contact_ids: list[str] = field(default_factory=list)
-    attendee_emails_by_id: dict[str, str] = field(default_factory=dict)
-    calendar_checked: bool = False
-    meeting_topic: str | None = None
-    meeting_started: bool | None = None
-    meeting_start_hour: int | None = None
-    meeting_start_minute: int | None = None
-    meeting_location_name: str | None = None
-    user_claimed_late: bool = False
-    weather_requested: bool = False
-    weather_checked: bool = False
-    weather_location_name: str | None = None
-    weather_location_id: str | None = None
-    weather_location_lookup_attempted: bool = False
-    weather_hour: int | None = None
-    weather_minute: int | None = None
-    weather_condition: str | None = None
-    weather_temperature: float | None = None
-    pending_lookup_role: Literal["recipient", "subject"] | None = None
-    pending_contact_matches: dict[str, str] = field(default_factory=dict)
-    preferences_checked: bool = False
-    content_message: str | None = None
-    confirmation_requested: bool = False
-    confirmed: bool = False
-    completed: bool = False
-    failure_message: str | None = None
-
-
-@dataclass
-class HighBeamFlow:
-    active: bool = False
-    on: bool = True
-    exterior_lights_checked: bool = False
-    fog_lights_on: bool | None = None
-    confirmation_requested: bool = False
-    confirmed: bool = False
-    declined: bool = False
-    completed: bool = False
-
-
-@dataclass
-class FogLightFlow:
-    active: bool = False
-    on: bool = True
-    weather_checked: bool = False
-    weather_condition: str | None = None
-    weather_confirmation_requested: bool = False
-    weather_confirmed: bool = False
-    exterior_lights_checked: bool = False
-    fog_lights_on: bool | None = None
-    low_beams_on: bool | None = None
-    high_beams_on: bool | None = None
-    high_beam_confirmation_requested: bool = False
-    high_beam_confirmed: bool = False
-    declined: bool = False
-    completed: bool = False
-
-
-@dataclass
-class DefrostFlow:
-    active: bool = False
-    on: bool = True
-    defrost_window: Literal["ALL", "FRONT", "REAR"] | None = None
-    climate_checked: bool = False
-    windows_checked: bool = False
-    fan_speed: int | None = None
-    fan_airflow_direction: str | None = None
-    air_conditioning: bool | None = None
-    window_driver_position: int | None = None
-    window_passenger_position: int | None = None
-    window_driver_rear_position: int | None = None
-    window_passenger_rear_position: int | None = None
-    completed: bool = False
-
-
-@dataclass
-class ControllerState:
-    runtime: RuntimeContext = field(default_factory=RuntimeContext)
-    sunroof: SunroofFlow = field(default_factory=SunroofFlow)
-    sunshade: SunshadeFlow = field(default_factory=SunshadeFlow)
-    window: WindowFlow = field(default_factory=WindowFlow)
-    window_match: WindowMatchFlow = field(default_factory=WindowMatchFlow)
-    ambient_light: AmbientLightFlow = field(default_factory=AmbientLightFlow)
-    trunk: TrunkFlow = field(default_factory=TrunkFlow)
-    air_circulation: AirCirculationFlow = field(default_factory=AirCirculationFlow)
-    air_conditioning: AirConditioningFlow = field(default_factory=AirConditioningFlow)
-    air_quality: AirQualityFlow = field(default_factory=AirQualityFlow)
-    fan_speed: FanSpeedFlow = field(default_factory=FanSpeedFlow)
-    cabin_temperature: CabinTemperatureFlow = field(
-        default_factory=CabinTemperatureFlow
-    )
-    steering_wheel_heating: SteeringWheelHeatingFlow = field(
-        default_factory=SteeringWheelHeatingFlow
-    )
-    climate_inspection: ClimateInspectionFlow = field(
-        default_factory=ClimateInspectionFlow
-    )
-    climate_energy_inspection: ClimateEnergyInspectionFlow = field(
-        default_factory=ClimateEnergyInspectionFlow
-    )
-    occupancy_comfort: OccupancyComfortFlow = field(
-        default_factory=OccupancyComfortFlow
-    )
-    driver_comfort_temperature: DriverComfortTemperatureFlow = field(
-        default_factory=DriverComfortTemperatureFlow
-    )
-    passenger_comfort_match: PassengerComfortMatchFlow = field(
-        default_factory=PassengerComfortMatchFlow
-    )
-    reading_light: ReadingLightFlow = field(default_factory=ReadingLightFlow)
-    reading_light_occupancy: ReadingLightOccupancyFlow = field(
-        default_factory=ReadingLightOccupancyFlow
-    )
-    navigation: NavigationFlow = field(default_factory=NavigationFlow)
-    poi: POIFlow = field(default_factory=POIFlow)
-    route_energy: RouteEnergyFlow = field(default_factory=RouteEnergyFlow)
-    email: EmailFlow = field(default_factory=EmailFlow)
-    high_beam: HighBeamFlow = field(default_factory=HighBeamFlow)
-    fog_lights: FogLightFlow = field(default_factory=FogLightFlow)
-    defrost: DefrostFlow = field(default_factory=DefrostFlow)
-    last_user_text: str = ""
-    recent_meeting_topic: str | None = None
-    recent_calendar_meetings: list[dict[str, Any]] = field(default_factory=list)
-    business_email_extra_recipients: list[str] = field(default_factory=list)
-    pending_location_lookup_name: str | None = None
-    recent_location_lookup_name: str | None = None
-    recent_location_lookup_id: str | None = None
-    recent_navigation_route_ids: list[str] = field(default_factory=list)
-    recent_navigation_waypoints: list[str] = field(default_factory=list)
-    planned_navigation_route_ids: list[str] = field(default_factory=list)
-    planned_navigation_waypoints: list[str] = field(default_factory=list)
-    planned_navigation_selected_routes: list[dict[str, Any]] = field(
-        default_factory=list
-    )
-    planned_navigation_considered_routes: list[dict[str, Any]] = field(
-        default_factory=list
-    )
-    planned_navigation_arrival_minutes: int | None = None
-    pending_poi_after_navigation: POIFlow | None = None
-    pending_set_navigation_route_ids: list[str] = field(default_factory=list)
-    multi_stop_navigation: MultiStopNavigationFlow = field(
-        default_factory=MultiStopNavigationFlow
-    )
-    recent_driver_temperature: float | None = None
-    recent_passenger_temperature: float | None = None
-    recent_charging_pois: list[dict[str, Any]] = field(default_factory=list)
-    recent_charging_route_id: str | None = None
-    recent_charging_at_kilometer: float | None = None
-    recent_selected_charging_poi_id: str | None = None
-    recent_selected_charging_poi_name: str | None = None
-    recent_selected_charging_plug_id: str | None = None
-    recent_selected_charging_phone_number: str | None = None
-    recent_window_positions: dict[str, int] = field(default_factory=dict)
-    recent_air_conditioning: bool | None = None
-    recent_air_circulation: str | None = None
-    pending_direct_response: str | None = None
 
 
 class PolicyAwareController:
@@ -9275,28 +8735,6 @@ def _route_energy_arrival_minutes_at_kilometer(
     return (current_minutes + elapsed) % (24 * 60)
 
 
-def _poi_open_at_minutes(poi: dict[str, Any], target_minutes: int) -> bool:
-    opening_hours = _format_opening_hours(
-        poi.get("opening_hours") or poi.get("opening_times") or poi.get("hours")
-    )
-    if not opening_hours:
-        return False
-    match = re.search(
-        r"(\d{1,2}):(\d{2})\s*h?\s*-\s*(\d{1,2}):(\d{2})\s*h?",
-        opening_hours,
-    )
-    if not match:
-        return False
-    open_minutes = int(match.group(1)) * 60 + int(match.group(2))
-    close_hour = int(match.group(3))
-    close_minutes = min(close_hour, 23) * 60 + int(match.group(4))
-    if close_hour == 24:
-        close_minutes = 24 * 60 - 1
-    if close_minutes < open_minutes:
-        return target_minutes >= open_minutes or target_minutes <= close_minutes
-    return open_minutes <= target_minutes <= close_minutes
-
-
 def _route_energy_selected_route(flow: RouteEnergyFlow) -> dict[str, Any] | None:
     if not flow.routes:
         return None
@@ -9426,13 +8864,6 @@ def _format_current_route_energy_summary(flow: RouteEnergyFlow) -> str | None:
     return route_text
 
 
-def _route_has_alias(route: dict[str, Any], alias: str) -> bool:
-    aliases = route.get("alias")
-    if not isinstance(aliases, list):
-        return False
-    return alias in {str(value).lower() for value in aliases}
-
-
 def _extract_km_value(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
@@ -9479,18 +8910,6 @@ def _extract_minutes_value(value: Any) -> float | None:
         if match:
             return float(match.group(1))
     return None
-
-
-POI_CATEGORY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("restaurants", ("restaurant", "restaurants", "meal", "dinner", "lunch")),
-    ("fast_food", ("fast food", "burger", "drive-through", "drive through")),
-    ("charging_stations", ("charging station", "charging stations", "charger")),
-    ("public_toilets", ("toilet", "toilets", "restroom", "bathroom")),
-    ("supermarkets", ("supermarket", "grocery", "groceries")),
-    ("parking", ("parking", "car park")),
-    ("bakery", ("bakery", "bakeries")),
-    ("airports", ("airport", "airports")),
-)
 
 
 def _is_poi_request(text: str) -> bool:
@@ -9543,17 +8962,6 @@ def _route_id_for_poi_followup(state: ControllerState) -> str | None:
         return state.recent_navigation_route_ids[-1]
     if state.navigation.routes_to_final_destination_id:
         return state.navigation.routes_to_final_destination_id[-1]
-    return None
-
-
-def _extract_poi_category(text: str) -> str:
-    return _poi_category_from_text(text) or "restaurants"
-
-
-def _poi_category_from_text(text: str) -> str | None:
-    for category, terms in POI_CATEGORY_TERMS:
-        if any(term in text for term in terms):
-            return category
     return None
 
 
@@ -10008,86 +9416,6 @@ def _extract_poi_option_index(text: str) -> int | None:
     return None
 
 
-def _format_poi_choice_prompt(category: str, pois: list[dict[str, Any]]) -> str:
-    label = _friendly_poi_category(category)
-    options = []
-    for index, poi in enumerate(pois[:4], start=1):
-        name = poi.get("name")
-        if not isinstance(name, str) or not name.strip():
-            name = f"Option {index}"
-        details = []
-        opening_hours = _format_opening_hours(
-            poi.get("opening_hours") or poi.get("opening_times") or poi.get("hours")
-        )
-        if opening_hours:
-            details.append(f"open {opening_hours}")
-        rating = poi.get("rating")
-        if isinstance(rating, (int, float)):
-            details.append(f"rating {rating:g}")
-        suffix = f" ({', '.join(details)})" if details else ""
-        options.append(f"{index}. {name}{suffix}")
-
-    singular = label[:-1] if label.endswith("s") else label
-    return f"I found these {label}: {'; '.join(options)}. Which {singular} would you like?"
-
-
-def _friendly_poi_category(category: str) -> str:
-    return {
-        "restaurants": "restaurants",
-        "fast_food": "fast-food places",
-        "charging_stations": "charging stations",
-        "public_toilets": "public toilets",
-        "supermarkets": "supermarkets",
-        "parking": "parking options",
-        "bakery": "bakeries",
-        "airports": "airports",
-    }.get(category, category.replace("_", " "))
-
-
-def _format_opening_hours(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, dict):
-        for key in ("today", "current_day", "opening_hours", "hours"):
-            if key in value:
-                return _format_opening_hours(value[key])
-        for nested in value.values():
-            formatted = _format_opening_hours(nested)
-            if formatted:
-                return formatted
-        return None
-    if isinstance(value, list):
-        formatted_values = [
-            formatted
-            for item in value[:2]
-            if (formatted := _format_opening_hours(item))
-        ]
-        return ", ".join(formatted_values) if formatted_values else None
-    text = str(value).strip()
-    if not text:
-        return None
-
-    def convert_ampm(match: re.Match[str]) -> str:
-        hour = int(match.group(1))
-        minute = match.group(2) or "00"
-        suffix = match.group(3).lower()
-        if suffix == "pm" and hour != 12:
-            hour += 12
-        if suffix == "am" and hour == 12:
-            hour = 0
-        return f"{hour:02d}:{minute}h"
-
-    text = re.sub(
-        r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
-        convert_ampm,
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(r"\b(\d{1,2}:\d{2})(?!\s*h)\b", r"\1h", text)
-    text = re.sub(r"\s*[-–—]\s*", " - ", text)
-    return text
-
-
 def _normalized_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value)
     without_marks = "".join(
@@ -10207,189 +9535,6 @@ def _navigation_adjacent_waypoints(
     )
 
 
-def _navigation_completion_message(
-    action_summary: str,
-    route: dict[str, Any],
-    preference: Literal["fastest", "shortest"] | None,
-    considered_routes: list[dict[str, Any]] | None = None,
-) -> str:
-    parts = [f"Done, {action_summary}."]
-    route_choice = _route_choice_label(route, preference)
-    if route_choice:
-        parts.append(f"I used the {route_choice} route.")
-    toll_notice = _route_toll_notice_parts(
-        [route],
-        considered_routes,
-        selected_text="This route includes toll roads.",
-        alternative_text="An available alternative route includes toll roads.",
-        alternative_question="Would you like more information on the alternative routes?",
-    )
-    parts.extend(toll_notice)
-    if _has_route_alternatives(
-        [route], considered_routes
-    ) and not _includes_alternative_route_question(parts):
-        parts.append("Would you like more information on the alternative routes?")
-    return " ".join(parts)
-
-
-def _navigation_multi_route_completion_message(
-    action_summary: str,
-    routes: list[dict[str, Any]],
-    preference: Literal["fastest", "shortest"] | None,
-    considered_routes: list[dict[str, Any]] | None = None,
-) -> str:
-    parts = [f"Done, {action_summary}."]
-    route_choice = _route_choice_label(routes[0], preference) if routes else None
-    if route_choice:
-        parts.append(f"I used the {route_choice} route segments.")
-    toll_notice = _route_toll_notice_parts(
-        routes,
-        considered_routes,
-        selected_text="At least one selected route segment includes toll roads.",
-        alternative_text="An available alternative route segment includes toll roads.",
-        alternative_question="Would you like more information on the alternative route segments?",
-    )
-    parts.extend(toll_notice)
-    if _has_route_alternatives(
-        routes, considered_routes
-    ) and not _includes_alternative_route_question(parts):
-        parts.append("Would you like more information on the alternative route segments?")
-    return " ".join(parts)
-
-
-def _has_route_alternatives(
-    selected_routes: list[dict[str, Any]],
-    considered_routes: list[dict[str, Any]] | None,
-) -> bool:
-    if not considered_routes:
-        return False
-    selected_ids = {
-        route_id
-        for route in selected_routes
-        if isinstance(route_id := route.get("route_id"), str)
-    }
-    considered_ids = {
-        route_id
-        for route in considered_routes
-        if isinstance(route_id := route.get("route_id"), str)
-    }
-    if selected_ids and considered_ids:
-        return bool(considered_ids - selected_ids)
-    return len(considered_routes) > len(selected_routes)
-
-
-def _includes_alternative_route_question(parts: list[str]) -> bool:
-    return any("would you like more information" in part.lower() for part in parts)
-
-
-def _route_choice_label(
-    route: dict[str, Any], preference: Literal["fastest", "shortest"] | None
-) -> str | None:
-    if preference is not None:
-        return preference
-    aliases = route.get("alias")
-    if isinstance(aliases, list):
-        lowered_aliases = {str(alias).lower() for alias in aliases}
-        if "fastest" in lowered_aliases and "shortest" in lowered_aliases:
-            return "fastest and shortest"
-        if "fastest" in lowered_aliases:
-            return "fastest"
-        if "shortest" in lowered_aliases:
-            return "shortest"
-        if "second" in lowered_aliases:
-            return "second"
-        if "third" in lowered_aliases:
-            return "third"
-        if "first" in lowered_aliases:
-            return "first"
-    return None
-
-
-def _route_has_toll(route: dict[str, Any]) -> bool:
-    if route.get("includes_toll") is True:
-        return True
-    road_types = route.get("road_types")
-    if isinstance(road_types, list):
-        return any("toll" in str(road_type).lower() for road_type in road_types)
-    return False
-
-
-def _route_toll_notice_parts(
-    selected_routes: list[dict[str, Any]],
-    considered_routes: list[dict[str, Any]] | None,
-    *,
-    selected_text: str,
-    alternative_text: str,
-    alternative_question: str | None = None,
-    fastest_alternative_text: str | None = None,
-) -> list[str]:
-    if any(_route_has_toll(route) for route in selected_routes):
-        return [selected_text]
-    if considered_routes:
-        toll_routes = [route for route in considered_routes if _route_has_toll(route)]
-        if not toll_routes:
-            return []
-        selected_ids = {
-            route_id
-            for route in selected_routes
-            if isinstance(route_id := route.get("route_id"), str)
-        }
-        fastest_toll_alternative = any(
-            _route_has_alias(route, "fastest")
-            and (
-                not selected_ids
-                or not isinstance(route.get("route_id"), str)
-                or route.get("route_id") not in selected_ids
-            )
-            for route in toll_routes
-        )
-        parts = [
-            fastest_alternative_text
-            if fastest_alternative_text and fastest_toll_alternative
-            else alternative_text
-        ]
-        if alternative_question:
-            parts.append(alternative_question)
-        return parts
-    return []
-
-
-def _route_has_alias(route: dict[str, Any], alias: str) -> bool:
-    aliases = route.get("alias") or []
-    return isinstance(aliases, list) and alias in {
-        str(route_alias).lower() for route_alias in aliases
-    }
-
-
-def _select_route(
-    routes: list[dict[str, Any]],
-    preference: Literal["fastest", "shortest"] | None,
-) -> dict[str, Any] | None:
-    if not routes:
-        return None
-    if preference is None:
-        return routes[0] if len(routes) == 1 else None
-    for route in routes:
-        aliases = route.get("alias") or []
-        if isinstance(aliases, list) and preference in {
-            str(alias).lower() for alias in aliases
-        }:
-            return route
-    return routes[0] if len(routes) == 1 else None
-
-
-def _select_requested_route(
-    routes: list[dict[str, Any]],
-    preference: Literal["fastest", "shortest"] | None,
-    selected_index: int | None,
-) -> dict[str, Any] | None:
-    if selected_index is not None:
-        if 0 <= selected_index < len(routes):
-            return routes[selected_index]
-        return None
-    return _select_route(routes, preference)
-
-
 def _select_navigation_requested_route(
     navigation: NavigationFlow,
 ) -> dict[str, Any] | None:
@@ -10409,61 +9554,6 @@ def _select_navigation_requested_route(
         navigation.routes,
         navigation.route_preference or "fastest",
         navigation.toll_avoidance_tolerance_minutes,
-    )
-
-
-def _select_toll_aware_route(
-    routes: list[dict[str, Any]],
-    preference: Literal["fastest", "shortest"],
-    tolerance_minutes: int,
-) -> dict[str, Any] | None:
-    if not routes:
-        return None
-    baseline = _select_route(routes, preference) or routes[0]
-    toll_free_routes = [route for route in routes if not _route_has_toll(route)]
-    if not toll_free_routes:
-        return baseline
-    best_toll_free = min(
-        toll_free_routes,
-        key=lambda route: _route_duration_minutes(route) or float("inf"),
-    )
-    baseline_minutes = _route_duration_minutes(baseline)
-    toll_free_minutes = _route_duration_minutes(best_toll_free)
-    if baseline_minutes is None or toll_free_minutes is None:
-        return best_toll_free
-    if toll_free_minutes - baseline_minutes <= tolerance_minutes:
-        return best_toll_free
-    return baseline
-
-
-def _route_duration_minutes(route: dict[str, Any]) -> int | None:
-    hours = _safe_int(route.get("duration_hours"), 0) or 0
-    minutes = _safe_int(route.get("duration_minutes"), 0) or 0
-    total = hours * 60 + minutes
-    return total if total > 0 else None
-
-
-def _select_route_by_alias(
-    routes: list[dict[str, Any]], alias: str
-) -> dict[str, Any] | None:
-    for route in routes:
-        aliases = route.get("alias") or []
-        if isinstance(aliases, list) and alias in {
-            str(route_alias).lower() for route_alias in aliases
-        }:
-            return route
-    return None
-
-
-def _route_choice_is_unambiguous(routes: list[dict[str, Any]]) -> bool:
-    if len(routes) == 1:
-        return True
-    fastest = _select_route(routes, "fastest")
-    shortest = _select_route(routes, "shortest")
-    return (
-        fastest is not None
-        and shortest is not None
-        and fastest.get("route_id") == shortest.get("route_id")
     )
 
 
@@ -10488,118 +9578,6 @@ def _is_route_choice_preview_request(text: str) -> bool:
         re.search(r"\b(show|see|view|check|look)\b", text)
         and re.search(r"\b(route|option|alternative|via)\b", text)
     )
-
-
-def _format_route_choice_prompt(routes: list[dict[str, Any]]) -> str:
-    fastest = _select_route(routes, "fastest")
-    shortest = _select_route(routes, "shortest")
-    if (
-        fastest is not None
-        and shortest is not None
-        and fastest.get("route_id") == shortest.get("route_id")
-    ):
-        second_route = _select_route_by_alias(routes, "second")
-        if second_route is None and len(routes) > 1:
-            second_route = routes[1]
-        if second_route is not None and second_route.get("route_id") != fastest.get(
-            "route_id"
-        ):
-            return (
-                f"I found routes. Fastest and shortest: {_route_summary(fastest)}. "
-                f"Second route: {_route_summary(second_route)}. "
-                "Do you want the first route or the second route?"
-            )
-        return (
-            f"I selected the fastest route: {_route_summary(fastest)}. "
-            "It is also the shortest route. Do you want me to apply it?"
-        )
-    if fastest is not None and shortest is not None:
-        extra_count = max(len(routes) - len({id(fastest), id(shortest)}), 0)
-        extra_note = (
-            f" There are {extra_count} other alternatives." if extra_count else ""
-        )
-        return (
-            f"I found routes. Fastest: {_route_summary(fastest)}. "
-            f"Shortest: {_route_summary(shortest)}.{extra_note} "
-            "Do you want the fastest or shortest route?"
-        )
-    if len(routes) > 1:
-        second_route = _select_route_by_alias(routes, "second") or routes[1]
-        return (
-            f"I found routes. First route: {_route_summary(routes[0])}. "
-            f"Second route: {_route_summary(second_route)}. "
-            "Do you want the first route or the second route?"
-        )
-    return "I found multiple routes. Do you want the fastest or shortest route?"
-
-
-def _format_route_alternative_detail_prompt(routes: list[dict[str, Any]]) -> str:
-    if not routes:
-        return "I don't have route alternatives available. Do you want the fastest or shortest route?"
-
-    labels = ("First", "Second", "Third", "Fourth", "Fifth")
-    parts = []
-    for index, route in enumerate(routes[:5]):
-        label = _route_display_label(route, index, labels)
-        parts.append(f"{label}: {_route_summary(route)}.")
-
-    choices = _route_choice_labels(routes[:5])
-    if choices:
-        parts.append(f"Which route would you like: {choices}?")
-    else:
-        parts.append("Which route would you like?")
-    return " ".join(parts)
-
-
-def _route_display_label(
-    route: dict[str, Any], index: int, labels: tuple[str, ...]
-) -> str:
-    aliases = route.get("alias") or []
-    if isinstance(aliases, list):
-        lowered = {str(alias).lower() for alias in aliases}
-        for preferred in ("fastest", "shortest", "second", "third", "first"):
-            if preferred in lowered:
-                return preferred.capitalize()
-    return labels[index] if index < len(labels) else f"Route {index + 1}"
-
-
-def _route_choice_labels(routes: list[dict[str, Any]]) -> str:
-    labels: list[str] = []
-    for index, route in enumerate(routes):
-        label = _route_display_label(route, index, ("first", "second", "third"))
-        lowered = label.lower()
-        if lowered not in labels:
-            labels.append(lowered)
-    if not labels:
-        return ""
-    if len(labels) == 1:
-        return labels[0]
-    return f"{', '.join(labels[:-1])}, or {labels[-1]}"
-
-
-def _route_summary(route: dict[str, Any]) -> str:
-    distance = route.get("distance_km")
-    hours = _safe_int(route.get("duration_hours"), 0) or 0
-    minutes = _safe_int(route.get("duration_minutes"), 0) or 0
-    via = route.get("name_via")
-    parts = []
-    if isinstance(via, str) and via:
-        parts.append(f"via {via}")
-    if isinstance(distance, (int, float)):
-        parts.append(f"{distance:g} km")
-    if hours or minutes:
-        parts.append(_format_duration(hours, minutes))
-    if _route_has_toll(route):
-        parts.append("includes toll roads")
-    return ", ".join(parts) if parts else "route details are available"
-
-
-def _format_duration(hours: int, minutes: int) -> str:
-    if hours and minutes:
-        return f"{hours} h {minutes} min"
-    if hours:
-        return f"{hours} h"
-    return f"{minutes} min"
 
 
 def _is_close_request(text: str) -> bool:
