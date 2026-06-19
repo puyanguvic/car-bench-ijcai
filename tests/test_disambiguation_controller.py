@@ -238,6 +238,68 @@ def test_temperature_change_request_is_not_climate_inspection() -> None:
     assert action is None
 
 
+def test_climate_energy_inspection_checks_climate_and_occupancy() -> None:
+    controller = PolicyAwareController()
+    tools = [fake_tool("get_climate_settings"), fake_tool("get_seats_occupancy")]
+
+    action = controller.decide(
+        context_id="ctx-climate-energy-inspection",
+        messages=messages(),
+        tools=tools,
+        latest_user_text=(
+            "Can you tell me what the current climate settings are and "
+            "who's in the car? I'm trying to save a bit of energy."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_climate_settings", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-climate-energy-inspection",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_climate_settings",
+                {
+                    "fan_speed": 0,
+                    "fan_airflow_direction": "WINDSHIELD_FEET",
+                    "air_conditioning": False,
+                    "air_circulation": "AUTO",
+                    "window_front_defrost": False,
+                    "window_rear_defrost": False,
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_seats_occupancy", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-climate-energy-inspection",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_seats_occupancy",
+                {
+                    "seats_occupied": {
+                        "driver": True,
+                        "passenger": False,
+                        "driver_rear": False,
+                        "passenger_rear": False,
+                    }
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "passenger seat" in action.content.lower()
+    assert "seat heating" in action.content.lower()
+    assert "next energy-efficiency check" in action.content.lower()
+
+
 def test_occupancy_comfort_asks_for_settings_then_sets_occupied_seats() -> None:
     controller = PolicyAwareController()
     tools = occupancy_comfort_tools()
@@ -492,6 +554,152 @@ def test_occupancy_seat_heating_only_turns_off_unoccupied_front_seats() -> None:
     assert action is not None
     assert action.action == "respond"
     assert "rear seat" in action.content.lower()
+
+
+def test_occupancy_comfort_turns_off_empty_seats_and_matches_driver_temperature() -> None:
+    controller = PolicyAwareController()
+    tools = [*climate_inspection_tools(), *occupancy_comfort_tools()]
+
+    action = controller.decide(
+        context_id="ctx-occupancy-match-driver-temp",
+        messages=messages(),
+        tools=tools,
+        latest_user_text=(
+            "Only I'm in the car. Turn off seat heating for empty seats and "
+            "make the driver's temperature the same as the passenger's temperature."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_seats_occupancy", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-occupancy-match-driver-temp",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_seats_occupancy",
+                {
+                    "seats_occupied": {
+                        "driver": True,
+                        "passenger": False,
+                        "driver_rear": False,
+                        "passenger_rear": False,
+                    }
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "get_temperature_inside_car", "arguments": {}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-occupancy-match-driver-temp",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_temperature_inside_car",
+                {
+                    "climate_temperature_driver": 18.0,
+                    "climate_temperature_passenger": 23.0,
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "get_seat_heating_level", "arguments": {}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-occupancy-match-driver-temp",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_seat_heating_level",
+                {"seat_heating_driver": 2, "seat_heating_passenger": 3},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "set_seat_heating",
+            "arguments": {"seat_zone": "PASSENGER", "level": 0},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-occupancy-match-driver-temp",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result("set_seat_heating", {"seat_zone": "PASSENGER", "level": 0})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "set_climate_temperature",
+            "arguments": {"seat_zone": "DRIVER", "temperature": 23.0},
+        }
+    ]
+
+
+def test_occupancy_comfort_answers_empty_seat_heating_status() -> None:
+    controller = PolicyAwareController()
+    tools = [*climate_inspection_tools(), *occupancy_comfort_tools()]
+
+    action = controller.decide(
+        context_id="ctx-empty-seat-heating-status",
+        messages=messages(),
+        tools=tools,
+        latest_user_text="Is seat heating on for any of the empty seats?",
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_seats_occupancy", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-empty-seat-heating-status",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_seats_occupancy",
+                {
+                    "seats_occupied": {
+                        "driver": True,
+                        "passenger": False,
+                        "driver_rear": False,
+                        "passenger_rear": False,
+                    }
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "get_seat_heating_level", "arguments": {}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-empty-seat-heating-status",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_seat_heating_level",
+                {"seat_heating_driver": 2, "seat_heating_passenger": 3},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "passenger seat at level 3" in action.content
 
 
 def test_cabin_temperature_controller_sets_all_zones() -> None:
@@ -1018,6 +1226,41 @@ def test_window_match_controller_sets_rear_windows_to_front_position() -> None:
     ]
 
 
+def test_reading_light_occupancy_ignores_negated_ambient_light() -> None:
+    controller = PolicyAwareController()
+    tools = [
+        fake_tool(
+            "set_ambient_lights",
+            {
+                "on": {"type": "boolean"},
+                "lightcolor": {"type": "string"},
+            },
+            ["on", "lightcolor"],
+        ),
+        fake_tool("get_seats_occupancy"),
+        fake_tool(
+            "set_reading_light",
+            {
+                "position": {"type": "string"},
+                "on": {"type": "boolean"},
+            },
+            ["position", "on"],
+        ),
+    ]
+
+    action = controller.decide(
+        context_id="ctx-reading-not-ambient",
+        messages=messages(),
+        tools=tools,
+        latest_user_text=(
+            "Oh, not the ambient lights. I was thinking about the reading lights. "
+            "Turn them on for occupied seats and off for empty seats."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_seats_occupancy", "arguments": {}}]
+
+
 def test_reading_light_occupancy_controller_uses_seat_occupancy() -> None:
     controller = PolicyAwareController()
     tools = [
@@ -1161,6 +1404,62 @@ def test_air_conditioning_controller_satisfies_policy_before_turning_on() -> Non
     assert action is not None
     assert action.tool_calls == [
         {"tool_name": "set_air_conditioning", "arguments": {"on": True}}
+    ]
+
+
+def test_cool_down_request_uses_air_conditioning_policy_flow() -> None:
+    controller = PolicyAwareController()
+    tools = climate_tools()
+
+    action = controller.decide(
+        context_id="ctx-cool-down-policy",
+        messages=messages(),
+        tools=tools,
+        latest_user_text="I'm feeling warm inside the car. Can you help me cool down?",
+    )
+    assert action is not None
+    assert action.tool_calls == [{"tool_name": "get_climate_settings", "arguments": {}}]
+
+    action = controller.decide(
+        context_id="ctx-cool-down-policy",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_climate_settings", climate_result(fan_speed=0))
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "get_vehicle_window_positions", "arguments": {}}
+    ]
+
+    action = controller.decide(
+        context_id="ctx-cool-down-policy",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_vehicle_window_positions", window_positions(driver=100))
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "open_close_window",
+            "arguments": {"window": "DRIVER", "percentage": 0},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-cool-down-policy",
+        messages=messages(),
+        tools=tools,
+        latest_tool_results=[
+            tool_result("open_close_window", {"window": "DRIVER", "percentage": 0})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {"tool_name": "set_fan_speed", "arguments": {"level": 1}}
     ]
 
 

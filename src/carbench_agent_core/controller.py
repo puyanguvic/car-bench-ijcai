@@ -216,18 +216,39 @@ class ClimateInspectionFlow:
 
 
 @dataclass
+class ClimateEnergyInspectionFlow:
+    active: bool = False
+    climate_checked: bool = False
+    seats_checked: bool = False
+    fan_speed: int | None = None
+    fan_airflow_direction: str | None = None
+    air_conditioning: bool | None = None
+    air_circulation: str | None = None
+    window_front_defrost: bool | None = None
+    window_rear_defrost: bool | None = None
+    seats_occupied: dict[str, bool] = field(default_factory=dict)
+    completed: bool = False
+
+
+@dataclass
 class OccupancyComfortFlow:
     active: bool = False
     seats_checked: bool = False
     seats_occupied: dict[str, bool] = field(default_factory=dict)
     needs_temperature: bool = False
     target_temperature: float | None = None
+    target_temperature_zone: Literal["ALL_ZONES", "DRIVER", "PASSENGER"] = "ALL_ZONES"
+    match_driver_to_passenger_temperature: bool = False
+    temperature_checked: bool = False
+    driver_temperature: float | None = None
+    passenger_temperature: float | None = None
     target_heating_level: int | None = None
     heating_delta: int | None = None
     seat_heating_checked: bool = False
     seat_heating_driver: int | None = None
     seat_heating_passenger: int | None = None
     turn_off_unoccupied: bool = False
+    query_unoccupied_heating_status: bool = False
     unoccupied_heating_set: bool = False
     preferences_checked: bool = False
     steering_wheel_requested: bool = False
@@ -529,6 +550,9 @@ class ControllerState:
     climate_inspection: ClimateInspectionFlow = field(
         default_factory=ClimateInspectionFlow
     )
+    climate_energy_inspection: ClimateEnergyInspectionFlow = field(
+        default_factory=ClimateEnergyInspectionFlow
+    )
     occupancy_comfort: OccupancyComfortFlow = field(
         default_factory=OccupancyComfortFlow
     )
@@ -635,6 +659,8 @@ class PolicyAwareController:
             action = self._next_cabin_temperature_action(state, tool_index)
         elif state.steering_wheel_heating.active:
             action = self._next_steering_wheel_heating_action(state, tool_index)
+        elif state.climate_energy_inspection.active:
+            action = self._next_climate_energy_inspection_action(state, tool_index)
         elif state.climate_inspection.active:
             action = self._next_climate_inspection_action(state, tool_index)
         elif state.occupancy_comfort.active:
@@ -734,6 +760,8 @@ class PolicyAwareController:
             state.cabin_temperature.active and not state.cabin_temperature.completed,
             state.steering_wheel_heating.active
             and not state.steering_wheel_heating.completed,
+            state.climate_energy_inspection.active
+            and not state.climate_energy_inspection.completed,
             state.climate_inspection.active
             and not state.climate_inspection.completed,
             state.occupancy_comfort.active
@@ -763,6 +791,8 @@ class PolicyAwareController:
             state.cabin_temperature = CabinTemperatureFlow()
         if state.steering_wheel_heating.completed:
             state.steering_wheel_heating = SteeringWheelHeatingFlow()
+        if state.climate_energy_inspection.completed:
+            state.climate_energy_inspection = ClimateEnergyInspectionFlow()
         if state.climate_inspection.completed:
             state.climate_inspection = ClimateInspectionFlow()
         if state.occupancy_comfort.completed:
@@ -799,6 +829,8 @@ class PolicyAwareController:
             state.cabin_temperature = CabinTemperatureFlow()
         if state.steering_wheel_heating.completed:
             state.steering_wheel_heating = SteeringWheelHeatingFlow()
+        if state.climate_energy_inspection.completed:
+            state.climate_energy_inspection = ClimateEnergyInspectionFlow()
         if state.climate_inspection.completed:
             state.climate_inspection = ClimateInspectionFlow()
         if state.occupancy_comfort.completed:
@@ -1119,6 +1151,10 @@ class PolicyAwareController:
             ):
                 state.occupancy_comfort.target_heating_level = clarified_level
                 updated = True
+            if _is_unoccupied_seat_heating_status_query(lowered):
+                state.occupancy_comfort.query_unoccupied_heating_status = True
+                state.occupancy_comfort.completed = False
+                updated = True
             if updated:
                 return
 
@@ -1339,6 +1375,11 @@ class PolicyAwareController:
             state.occupancy_comfort = OccupancyComfortFlow(
                 active=True,
                 needs_temperature=_occupancy_comfort_needs_temperature(lowered),
+                target_temperature_zone=(
+                    "DRIVER"
+                    if _is_driver_temperature_match_passenger_request(lowered)
+                    else "ALL_ZONES"
+                ),
                 target_temperature=_resolve_temperature_setting(
                     lowered,
                     state,
@@ -1347,6 +1388,12 @@ class PolicyAwareController:
                 target_heating_level=_extract_seat_heating_target_level(lowered),
                 heating_delta=_extract_heating_delta(lowered),
                 turn_off_unoccupied=_requests_unoccupied_seat_heating_off(lowered),
+                query_unoccupied_heating_status=(
+                    _is_unoccupied_seat_heating_status_query(lowered)
+                ),
+                match_driver_to_passenger_temperature=(
+                    _is_driver_temperature_match_passenger_request(lowered)
+                ),
                 steering_wheel_requested="steering wheel" in lowered,
                 steering_wheel_level=_extract_steering_wheel_heating_level(lowered),
             )
@@ -1360,6 +1407,8 @@ class PolicyAwareController:
                     "DRIVER",
                 ),
             )
+        elif _is_climate_energy_inspection_request(lowered):
+            state.climate_energy_inspection = ClimateEnergyInspectionFlow(active=True)
         elif _is_climate_inspection_request(lowered):
             state.climate_inspection = ClimateInspectionFlow(
                 active=True,
@@ -1694,6 +1743,22 @@ class PolicyAwareController:
                 air_circulation = result.get("air_circulation")
                 if isinstance(air_circulation, str):
                     state.recent_air_circulation = air_circulation
+                if state.climate_energy_inspection.active:
+                    climate_energy = state.climate_energy_inspection
+                    climate_energy.climate_checked = True
+                    climate_energy.fan_speed = fan_speed
+                    if isinstance(airflow, str):
+                        climate_energy.fan_airflow_direction = airflow
+                    if isinstance(ac_value, bool):
+                        climate_energy.air_conditioning = ac_value
+                    if isinstance(air_circulation, str):
+                        climate_energy.air_circulation = air_circulation
+                    front_defrost = result.get("window_front_defrost")
+                    if isinstance(front_defrost, bool):
+                        climate_energy.window_front_defrost = front_defrost
+                    rear_defrost = result.get("window_rear_defrost")
+                    if isinstance(rear_defrost, bool):
+                        climate_energy.window_rear_defrost = rear_defrost
             elif name == "get_temperature_inside_car" and isinstance(result, dict):
                 climate = state.climate_inspection
                 climate.temperature_checked = True
@@ -1707,6 +1772,16 @@ class PolicyAwareController:
                 )
                 state.recent_driver_temperature = climate.driver_temperature
                 state.recent_passenger_temperature = climate.passenger_temperature
+                occupancy = state.occupancy_comfort
+                occupancy.temperature_checked = True
+                occupancy.driver_temperature = _safe_float(
+                    result.get("climate_temperature_driver"),
+                    occupancy.driver_temperature,
+                )
+                occupancy.passenger_temperature = _safe_float(
+                    result.get("climate_temperature_passenger"),
+                    occupancy.passenger_temperature,
+                )
                 unit = result.get("temperature_unit")
                 if isinstance(unit, str) and unit.strip():
                     climate.temperature_unit = unit.strip()
@@ -2013,6 +2088,13 @@ class PolicyAwareController:
                     state.occupancy_comfort.seats_checked = True
                     if isinstance(seats, dict):
                         state.occupancy_comfort.seats_occupied = {
+                            str(seat): bool(occupied)
+                            for seat, occupied in seats.items()
+                        }
+                if state.climate_energy_inspection.active:
+                    state.climate_energy_inspection.seats_checked = True
+                    if isinstance(seats, dict):
+                        state.climate_energy_inspection.seats_occupied = {
                             str(seat): bool(occupied)
                             for seat, occupied in seats.items()
                         }
@@ -3122,6 +3204,45 @@ class PolicyAwareController:
             reason="cabin_temperature_set",
         )
 
+    def _next_climate_energy_inspection_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        inspection = state.climate_energy_inspection
+
+        if inspection.completed:
+            state.climate_energy_inspection = ClimateEnergyInspectionFlow()
+            return None
+
+        if not inspection.climate_checked:
+            if not tool_index.has("get_climate_settings"):
+                inspection.completed = True
+                return NextAction.respond(
+                    "I can't check the current climate settings right now.",
+                    reason="climate_energy_inspection_missing_climate_tool",
+                )
+            return NextAction.tool_call(
+                "get_climate_settings",
+                reason="climate_energy_inspection_climate_check",
+            )
+
+        if not inspection.seats_checked:
+            if not tool_index.has("get_seats_occupancy"):
+                inspection.completed = True
+                return NextAction.respond(
+                    "I can't check which seats are occupied right now.",
+                    reason="climate_energy_inspection_missing_occupancy_tool",
+                )
+            return NextAction.tool_call(
+                "get_seats_occupancy",
+                reason="climate_energy_inspection_occupancy_check",
+            )
+
+        inspection.completed = True
+        return NextAction.respond(
+            _format_climate_energy_inspection_summary(inspection),
+            reason="climate_energy_inspection_done",
+        )
+
     def _next_climate_inspection_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -3210,6 +3331,64 @@ class PolicyAwareController:
                 reason="occupancy_comfort_occupancy_check",
             )
 
+        if not comfort.seats_occupied:
+            comfort.completed = True
+            return NextAction.respond(
+                "I can't tell which seats are occupied, so I can't optimize seat heating by occupancy.",
+                reason="occupancy_comfort_missing_occupancy_result",
+            )
+
+        if (
+            comfort.match_driver_to_passenger_temperature
+            and not comfort.temperature_checked
+        ):
+            if not tool_index.has("get_temperature_inside_car"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't check the current passenger temperature, so I can't match the driver temperature to it.",
+                    reason="occupancy_comfort_missing_temperature_check",
+                )
+            return NextAction.tool_call(
+                "get_temperature_inside_car",
+                reason="occupancy_comfort_temperature_check",
+            )
+
+        if (
+            comfort.match_driver_to_passenger_temperature
+            and comfort.target_temperature is None
+        ):
+            if comfort.passenger_temperature is None:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't determine the current passenger temperature from the available tool result.",
+                    reason="occupancy_comfort_missing_passenger_temperature_result",
+                )
+            comfort.needs_temperature = True
+            comfort.target_temperature_zone = "DRIVER"
+            comfort.target_temperature = comfort.passenger_temperature
+
+        if (
+            comfort.query_unoccupied_heating_status
+            and not comfort.seat_heating_checked
+        ):
+            if not tool_index.has("get_seat_heating_level"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't check the current seat heating levels right now.",
+                    reason="occupancy_comfort_missing_seat_heating_check",
+                )
+            return NextAction.tool_call(
+                "get_seat_heating_level",
+                reason="occupancy_comfort_unoccupied_heating_status_check",
+            )
+
+        if comfort.query_unoccupied_heating_status:
+            comfort.completed = True
+            return NextAction.respond(
+                _format_unoccupied_seat_heating_status(comfort),
+                reason="occupancy_comfort_unoccupied_heating_status",
+            )
+
         if comfort.turn_off_unoccupied and not comfort.seat_heating_checked:
             if not tool_index.has("get_seat_heating_level"):
                 comfort.completed = True
@@ -3220,13 +3399,6 @@ class PolicyAwareController:
             return NextAction.tool_call(
                 "get_seat_heating_level",
                 reason="occupancy_comfort_seat_heating_check",
-            )
-
-        if not comfort.seats_occupied:
-            comfort.completed = True
-            return NextAction.respond(
-                "I can't tell which seats are occupied, so I can't optimize seat heating by occupancy.",
-                reason="occupancy_comfort_missing_occupancy_result",
             )
 
         if comfort.needs_temperature and comfort.target_temperature is None:
@@ -3258,10 +3430,13 @@ class PolicyAwareController:
             comfort.target_heating_level = target_level
 
         if comfort.target_heating_level is None:
-            return NextAction.respond(
-                "What seat heating level should I use for the occupied seats?",
-                reason="occupancy_comfort_heating_level_disambiguation",
-            )
+            if comfort.turn_off_unoccupied:
+                comfort.seat_heating_set = True
+            else:
+                return NextAction.respond(
+                    "What seat heating level should I use for the occupied seats?",
+                    reason="occupancy_comfort_heating_level_disambiguation",
+                )
 
         if (
             comfort.needs_temperature
@@ -3284,7 +3459,7 @@ class PolicyAwareController:
             return NextAction.tool_call(
                 "set_climate_temperature",
                 {
-                    "seat_zone": "ALL_ZONES",
+                    "seat_zone": comfort.target_temperature_zone,
                     "temperature": comfort.target_temperature,
                 },
                 reason="occupancy_comfort_set_temperature",
@@ -3360,7 +3535,7 @@ class PolicyAwareController:
             return NextAction.tool_call(
                 "set_climate_temperature",
                 {
-                    "seat_zone": "ALL_ZONES",
+                    "seat_zone": comfort.target_temperature_zone,
                     "temperature": comfort.target_temperature,
                 },
                 reason="occupancy_comfort_set_temperature",
@@ -3394,10 +3569,15 @@ class PolicyAwareController:
         if comfort.turn_off_unoccupied:
             completed.insert(0, "turned off seat heating for unoccupied front seats")
         if comfort.needs_temperature:
+            target = (
+                "set the driver temperature to match the passenger temperature"
+                if comfort.match_driver_to_passenger_temperature
+                else "set the cabin temperature to "
+                f"{_format_temperature_target(comfort.target_temperature)}"
+            )
             completed.insert(
                 0,
-                "set the cabin temperature to "
-                f"{_format_temperature_target(comfort.target_temperature)}",
+                target,
             )
         if comfort.steering_wheel_requested:
             level = (
@@ -5252,7 +5432,8 @@ class PolicyAwareController:
                 reason="navigation_route_from_new_waypoint_lookup",
             )
 
-        if navigation.route_preference is None:
+        route_preference_defaulted = navigation.route_preference is None
+        if route_preference_defaulted:
             navigation.route_preference = "fastest"
 
         route_to_new_waypoint = _select_requested_route(
@@ -5305,7 +5486,7 @@ class PolicyAwareController:
         navigation.completion_message = _navigation_multi_route_completion_message(
             "the waypoint is replaced in the navigation route",
             [route_to_new_waypoint, route_from_new_waypoint],
-            navigation.route_preference,
+            None if route_preference_defaulted else navigation.route_preference,
             [
                 *navigation.routes_to_new_waypoint,
                 *navigation.routes_from_new_waypoint,
@@ -6248,6 +6429,8 @@ def _window_match_completion_message(match: WindowMatchFlow) -> str:
 
 
 def _is_ambient_light_request(text: str) -> bool:
+    if re.search(r"\b(?:not|no)\s+(?:the\s+)?ambient lights?\b", text):
+        return False
     return bool(
         ("ambient" in text and ("light" in text or "lighting" in text))
         or "cabin light" in text
@@ -6478,8 +6661,13 @@ def _is_air_circulation_request(text: str) -> bool:
 
 
 def _is_air_conditioning_request(text: str) -> bool:
-    if "air conditioning" not in text and not re.search(r"\bac\b", text):
-        return False
+    mentions_ac = "air conditioning" in text or re.search(r"\bac\b", text)
+    if not mentions_ac:
+        return bool(
+            re.search(r"\b(?:cool down|cool off)\b", text)
+            and any(word in text for word in ("warm", "hot", "heat", "heating"))
+            and any(word in text for word in ("car", "cabin", "interior", "inside"))
+        )
     return any(
         phrase in text
         for phrase in (
@@ -6734,6 +6922,34 @@ def _requests_unoccupied_seat_heating_off(text: str) -> bool:
     )
 
 
+def _is_unoccupied_seat_heating_status_query(text: str) -> bool:
+    if not _mentions_seat_heating(text):
+        return False
+    if not any(
+        phrase in text
+        for phrase in (
+            "unoccupied seat",
+            "unoccupied seats",
+            "empty seat",
+            "empty seats",
+            "seats that are empty",
+            "seats that are currently empty",
+        )
+    ):
+        return False
+    if _is_light_off_request(text):
+        return False
+    return bool(
+        "?" in text
+        or "currently being heated" in text
+        or "heating on" in text
+        or "is it on" in text
+        or "are any" in text
+        or "tell me" in text
+        or "need to know" in text
+    )
+
+
 def _is_child_seat_heating_status_query(text: str) -> bool:
     if "child" not in text and "kid" not in text:
         return False
@@ -6748,6 +6964,8 @@ def _is_child_seat_heating_status_query(text: str) -> bool:
 
 
 def _is_passenger_comfort_match_request(text: str) -> bool:
+    if _is_driver_temperature_match_passenger_request(text):
+        return False
     if "passenger" not in text or "driver" not in text:
         return False
     if not _mentions_seat_heating(text):
@@ -6759,6 +6977,23 @@ def _is_passenger_comfort_match_request(text: str) -> bool:
         or "same level" in text
         or "same as" in text
         or "driver side comfort" in text
+    )
+
+
+def _is_driver_temperature_match_passenger_request(text: str) -> bool:
+    if "driver" not in text or "passenger" not in text:
+        return False
+    if "temperature" not in text and "temp" not in text:
+        return False
+    return bool(
+        re.search(
+            r"\bdriver(?:'s)?(?: zone)? temperature\b.*\b(?:same as|match|matching)\b.*\bpassenger",
+            text,
+        )
+        or re.search(
+            r"\b(?:same as|match|matching)\b.*\bpassenger(?:'s)?(?: zone)? temperature\b",
+            text,
+        )
     )
 
 
@@ -6813,6 +7048,66 @@ def _is_climate_inspection_request(text: str) -> bool:
             "what are the current",
             "what the current",
         )
+    )
+
+
+def _is_climate_energy_inspection_request(text: str) -> bool:
+    has_energy_goal = bool(
+        re.search(r"\b(?:save|saving)\b[^.?!,;]{0,40}\benergy\b", text)
+        or re.search(r"\benergy\b[^.?!,;]{0,40}\b(?:save|saving)\b", text)
+    ) or any(
+        phrase in text
+        for phrase in (
+            "energy efficiency",
+            "energy efficient",
+            "waste energy",
+            "wasting energy",
+            "inefficient",
+            "inefficiencies",
+            "optimize",
+            "optimise",
+        )
+    )
+    if not has_energy_goal:
+        return False
+
+    has_climate_context = any(
+        phrase in text
+        for phrase in (
+            "climate",
+            "temperature",
+            "seat heating",
+            "heated seats",
+        )
+    )
+    if not has_climate_context:
+        return False
+
+    has_occupancy_context = any(
+        phrase in text
+        for phrase in (
+            "who's in the car",
+            "who is in the car",
+            "who's sitting",
+            "who is sitting",
+            "sitting where",
+            "seating situation",
+            "actually in the car",
+            "occupied",
+            "unoccupied",
+            "empty seat",
+            "empty seats",
+        )
+    )
+    if not has_occupancy_context:
+        return False
+
+    return bool(
+        "current" in text
+        or "check" in text
+        or "tell me" in text
+        or "what" in text
+        or "who" in text
     )
 
 
@@ -8561,6 +8856,12 @@ def _navigation_multi_route_completion_message(
         alternative_question="Would you like more information on the alternative route segments?",
     )
     parts.extend(toll_notice)
+    if (
+        preference is None
+        and considered_routes
+        and not any("would you like more information" in part.lower() for part in parts)
+    ):
+        parts.append("Would you like more information on the alternative route segments?")
     return " ".join(parts)
 
 
@@ -9440,6 +9741,91 @@ def _friendly_reading_light_position(position: str | None) -> str:
     }.get(position, "the requested")
 
 
+def _format_climate_energy_inspection_summary(
+    inspection: ClimateEnergyInspectionFlow,
+) -> str:
+    climate_parts = []
+    if inspection.fan_speed is not None:
+        climate_parts.append(f"fan speed {inspection.fan_speed}")
+    if inspection.fan_airflow_direction:
+        airflow = inspection.fan_airflow_direction.lower().replace("_", " ")
+        climate_parts.append(f"airflow {airflow}")
+    if inspection.air_conditioning is not None:
+        climate_parts.append(
+            "air conditioning on"
+            if inspection.air_conditioning
+            else "air conditioning off"
+        )
+    if inspection.air_circulation:
+        circulation = inspection.air_circulation.lower().replace("_", " ")
+        climate_parts.append(f"air circulation {circulation}")
+    defrost_parts = []
+    if inspection.window_front_defrost is not None:
+        defrost_parts.append(
+            "front defrost on"
+            if inspection.window_front_defrost
+            else "front defrost off"
+        )
+    if inspection.window_rear_defrost is not None:
+        defrost_parts.append(
+            "rear defrost on"
+            if inspection.window_rear_defrost
+            else "rear defrost off"
+        )
+    climate_summary = ", ".join([*climate_parts, *defrost_parts])
+    if not climate_summary:
+        climate_summary = "current climate settings are unavailable"
+
+    occupancy_summary = _format_seat_occupancy_summary(inspection.seats_occupied)
+    empty_front = _format_empty_front_seats(inspection.seats_occupied)
+    next_step = (
+        f"The next energy-efficiency check is whether seat heating is on for "
+        f"the empty {empty_front}."
+        if empty_front is not None
+        else "There are no empty controllable front seats to check for wasted seat heating."
+    )
+    return f"Current climate: {climate_summary}. Occupancy: {occupancy_summary}. {next_step}"
+
+
+def _format_seat_occupancy_summary(seats_occupied: dict[str, bool]) -> str:
+    if not seats_occupied:
+        return "unknown"
+    labels = {
+        "driver": "driver",
+        "passenger": "passenger",
+        "driver_rear": "driver rear",
+        "passenger_rear": "passenger rear",
+    }
+    occupied = [
+        label
+        for seat, label in labels.items()
+        if seats_occupied.get(seat) is True
+    ]
+    empty = [
+        label
+        for seat, label in labels.items()
+        if seats_occupied.get(seat) is False
+    ]
+    if occupied and empty:
+        return f"{', '.join(occupied)} occupied; {', '.join(empty)} empty"
+    if occupied:
+        return f"{', '.join(occupied)} occupied"
+    if empty:
+        return f"{', '.join(empty)} empty"
+    return "unknown"
+
+
+def _format_empty_front_seats(seats_occupied: dict[str, bool]) -> str | None:
+    empty = []
+    if seats_occupied.get("driver") is False:
+        empty.append("driver seat")
+    if seats_occupied.get("passenger") is False:
+        empty.append("passenger seat")
+    if not empty:
+        return None
+    return " and ".join(empty)
+
+
 def _format_climate_inspection_summary(climate: ClimateInspectionFlow) -> str:
     parts = []
     if climate.needs_temperature:
@@ -9546,6 +9932,22 @@ def _format_child_seat_heating_status(
             f"level {comfort.target_heating_level}."
         )
     return None
+
+
+def _format_unoccupied_seat_heating_status(comfort: OccupancyComfortFlow) -> str:
+    heated = []
+    if comfort.seats_occupied.get("driver") is False and (
+        comfort.seat_heating_driver or 0
+    ) > 0:
+        heated.append(f"driver seat at level {comfort.seat_heating_driver}")
+    if comfort.seats_occupied.get("passenger") is False and (
+        comfort.seat_heating_passenger or 0
+    ) > 0:
+        heated.append(f"passenger seat at level {comfort.seat_heating_passenger}")
+
+    if heated:
+        return f"Yes, seat heating is on for the empty {' and '.join(heated)}."
+    return "No, seat heating is not on for any empty front seat I can control."
 
 
 def _occupied_front_seat_heating_target(comfort: OccupancyComfortFlow) -> int | None:
