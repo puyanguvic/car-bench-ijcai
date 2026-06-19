@@ -242,6 +242,24 @@ def test_navigation_controller_sets_two_leg_navigation_route() -> None:
         }
     ]
 
+    action = controller.decide(
+        context_id="ctx-multi-stop-nav",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "set_new_navigation",
+                {
+                    "navigation_set": True,
+                    "waypoints": ["loc_berlin", "loc_bremen", "loc_amsterdam"],
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "would you like more information" in action.content.lower()
+
 
 def test_planned_navigation_followup_poi_search_does_not_start_old_route() -> None:
     controller = PolicyAwareController()
@@ -336,6 +354,58 @@ def test_planned_navigation_followup_poi_search_does_not_start_old_route() -> No
             },
         }
     ]
+
+    action = controller.decide(
+        context_id=context_id,
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "search_poi_at_location",
+                {
+                    "pois_found": [
+                        {
+                            "id": "poi_market_open",
+                            "name": "Billa",
+                            "category": "supermarkets",
+                            "opening_hours": "06:00h - 21:00h",
+                        }
+                    ]
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_routes_from_start_to_destination",
+            "arguments": {
+                "start_id": "loc_belgrade",
+                "destination_id": "poi_market_open",
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id=context_id,
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_routes_from_start_to_destination",
+                {
+                    "routes": [
+                        {"route_id": "route_bel_market_fast", "alias": ["fastest"]},
+                        {"route_id": "route_bel_market_second", "alias": ["second"]},
+                    ]
+                },
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "fastest route segment includes toll roads" in action.content.lower()
+    assert "do you want me to start navigation" in action.content.lower()
 
 
 def test_navigation_controller_asks_when_route_choice_is_ambiguous() -> None:

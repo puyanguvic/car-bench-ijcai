@@ -382,6 +382,8 @@ class POIFlow:
     route_start_id: str | None = None
     route_end_id: str | None = None
     route_prefix_ids: list[str] = field(default_factory=list)
+    route_prefix_selected_routes: list[dict[str, Any]] = field(default_factory=list)
+    route_prefix_considered_routes: list[dict[str, Any]] = field(default_factory=list)
     route_lookup: Literal["to_poi", "from_poi"] | None = None
     current_navigation_checked: bool = False
     required_open_at_minutes: int | None = None
@@ -623,6 +625,12 @@ class ControllerState:
     recent_navigation_waypoints: list[str] = field(default_factory=list)
     planned_navigation_route_ids: list[str] = field(default_factory=list)
     planned_navigation_waypoints: list[str] = field(default_factory=list)
+    planned_navigation_selected_routes: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+    planned_navigation_considered_routes: list[dict[str, Any]] = field(
+        default_factory=list
+    )
     planned_navigation_arrival_minutes: int | None = None
     pending_poi_after_navigation: POIFlow | None = None
     pending_set_navigation_route_ids: list[str] = field(default_factory=list)
@@ -1598,6 +1606,10 @@ class PolicyAwareController:
             search_along_route = _is_along_route_poi_request(lowered)
             route_id = _route_id_for_poi_followup(state)
             route_prefix_ids = list(state.planned_navigation_route_ids)
+            route_prefix_selected_routes = list(state.planned_navigation_selected_routes)
+            route_prefix_considered_routes = list(
+                state.planned_navigation_considered_routes
+            )
             route_start_id = (
                 state.planned_navigation_waypoints[-1]
                 if state.planned_navigation_waypoints
@@ -1624,6 +1636,8 @@ class PolicyAwareController:
                 route_id=route_id if search_along_route else None,
                 route_start_id=route_start_id if route_prefix_ids else None,
                 route_prefix_ids=route_prefix_ids,
+                route_prefix_selected_routes=route_prefix_selected_routes,
+                route_prefix_considered_routes=route_prefix_considered_routes,
                 required_open_at_minutes=required_open_at_minutes,
                 route_preference=_extract_route_preference(lowered),
                 replace_final_destination=_is_replace_destination_request(lowered)
@@ -2677,6 +2691,8 @@ class PolicyAwareController:
                 elif state.poi.active and state.poi.completed:
                     state.planned_navigation_route_ids = []
                     state.planned_navigation_waypoints = []
+                    state.planned_navigation_selected_routes = []
+                    state.planned_navigation_considered_routes = []
                 waypoints = result.get("new_waypoints")
                 if not isinstance(waypoints, list):
                     waypoints = result.get("new_waypoints_id")
@@ -5310,6 +5326,10 @@ class PolicyAwareController:
             completion_message="Done, navigation is started.",
         )
         state.recent_navigation_route_ids = list(route_ids)
+        state.planned_navigation_route_ids = []
+        state.planned_navigation_waypoints = []
+        state.planned_navigation_selected_routes = []
+        state.planned_navigation_considered_routes = []
         return NextAction.tool_call(
             "set_new_navigation",
             {"route_ids": route_ids},
@@ -5755,7 +5775,14 @@ class PolicyAwareController:
 
         if poi.route_prefix_ids:
             full_route_ids = poi.route_prefix_ids + [route_id]
+            selected_routes = [*poi.route_prefix_selected_routes, selected_route]
+            considered_routes = [
+                *poi.route_prefix_considered_routes,
+                *poi.routes,
+            ]
             state.planned_navigation_route_ids = list(full_route_ids)
+            state.planned_navigation_selected_routes = list(selected_routes)
+            state.planned_navigation_considered_routes = list(considered_routes)
             if poi.route_start_id and poi.selected_poi_id:
                 state.planned_navigation_waypoints = [
                     *state.planned_navigation_waypoints,
@@ -5764,10 +5791,25 @@ class PolicyAwareController:
             state.recent_navigation_route_ids = list(full_route_ids)
             if poi.defer_navigation_setup:
                 poi.completed = True
-                poi.completion_message = (
-                    "Done, I planned the multi-stop route. "
-                    "Do you want me to start navigation?"
+                message_parts = ["Done, I planned the multi-stop route."]
+                message_parts.extend(
+                    _route_toll_notice_parts(
+                        selected_routes,
+                        considered_routes,
+                        selected_text=(
+                            "At least one selected route segment includes toll roads."
+                        ),
+                        alternative_text=(
+                            "An available alternative route segment includes toll roads."
+                        ),
+                        fastest_alternative_text=(
+                            "The fastest route segment includes toll roads, "
+                            "so I used a toll-free alternative."
+                        ),
+                    )
                 )
+                message_parts.append("Do you want me to start navigation?")
+                poi.completion_message = " ".join(message_parts)
                 return self._next_poi_action(state, tool_index)
 
             if not tool_index.has("set_new_navigation"):
@@ -5910,6 +5952,8 @@ class PolicyAwareController:
             if isinstance(start_id, str) and isinstance(destination_id, str):
                 state.planned_navigation_route_ids = [route_id]
                 state.planned_navigation_waypoints = [start_id, destination_id]
+                state.planned_navigation_selected_routes = [selected_route]
+                state.planned_navigation_considered_routes = list(navigation.routes)
                 state.recent_navigation_route_ids = [route_id]
                 state.recent_navigation_waypoints = [start_id, destination_id]
                 duration = _route_duration_minutes(selected_route)
@@ -5924,6 +5968,8 @@ class PolicyAwareController:
                 if pending_poi is not None:
                     state.pending_poi_after_navigation = None
                     pending_poi.route_prefix_ids = [route_id]
+                    pending_poi.route_prefix_selected_routes = [selected_route]
+                    pending_poi.route_prefix_considered_routes = list(navigation.routes)
                     pending_poi.route_start_id = (
                         start_id if pending_poi.search_along_route else destination_id
                     )
@@ -7884,6 +7930,30 @@ def _is_climate_inspection_request(text: str) -> bool:
 
 
 def _is_climate_energy_inspection_request(text: str) -> bool:
+    if (
+        any(
+            phrase in text
+            for phrase in (
+                "climate settings",
+                "current climate",
+                "climate situation",
+            )
+        )
+        and any(
+            phrase in text
+            for phrase in (
+                "who's in the car",
+                "who is in the car",
+                "who's inside",
+                "who is inside",
+                "seating situation",
+                "which seats are occupied",
+                "seat occupancy",
+            )
+        )
+    ):
+        return True
+
     has_energy_goal = bool(
         re.search(r"\b(?:save|saving)\b[^.?!,;]{0,40}\benergy\b", text)
         or re.search(r"\benergy\b[^.?!,;]{0,40}\b(?:save|saving)\b", text)
@@ -10155,6 +10225,10 @@ def _navigation_completion_message(
         alternative_question="Would you like more information on the alternative routes?",
     )
     parts.extend(toll_notice)
+    if _has_route_alternatives(
+        [route], considered_routes
+    ) and not _includes_alternative_route_question(parts):
+        parts.append("Would you like more information on the alternative routes?")
     return " ".join(parts)
 
 
@@ -10176,13 +10250,36 @@ def _navigation_multi_route_completion_message(
         alternative_question="Would you like more information on the alternative route segments?",
     )
     parts.extend(toll_notice)
-    if (
-        preference is None
-        and considered_routes
-        and not any("would you like more information" in part.lower() for part in parts)
-    ):
+    if _has_route_alternatives(
+        routes, considered_routes
+    ) and not _includes_alternative_route_question(parts):
         parts.append("Would you like more information on the alternative route segments?")
     return " ".join(parts)
+
+
+def _has_route_alternatives(
+    selected_routes: list[dict[str, Any]],
+    considered_routes: list[dict[str, Any]] | None,
+) -> bool:
+    if not considered_routes:
+        return False
+    selected_ids = {
+        route_id
+        for route in selected_routes
+        if isinstance(route_id := route.get("route_id"), str)
+    }
+    considered_ids = {
+        route_id
+        for route in considered_routes
+        if isinstance(route_id := route.get("route_id"), str)
+    }
+    if selected_ids and considered_ids:
+        return bool(considered_ids - selected_ids)
+    return len(considered_routes) > len(selected_routes)
+
+
+def _includes_alternative_route_question(parts: list[str]) -> bool:
+    return any("would you like more information" in part.lower() for part in parts)
 
 
 def _route_choice_label(
@@ -10224,15 +10321,44 @@ def _route_toll_notice_parts(
     selected_text: str,
     alternative_text: str,
     alternative_question: str | None = None,
+    fastest_alternative_text: str | None = None,
 ) -> list[str]:
     if any(_route_has_toll(route) for route in selected_routes):
         return [selected_text]
-    if considered_routes and any(_route_has_toll(route) for route in considered_routes):
-        parts = [alternative_text]
+    if considered_routes:
+        toll_routes = [route for route in considered_routes if _route_has_toll(route)]
+        if not toll_routes:
+            return []
+        selected_ids = {
+            route_id
+            for route in selected_routes
+            if isinstance(route_id := route.get("route_id"), str)
+        }
+        fastest_toll_alternative = any(
+            _route_has_alias(route, "fastest")
+            and (
+                not selected_ids
+                or not isinstance(route.get("route_id"), str)
+                or route.get("route_id") not in selected_ids
+            )
+            for route in toll_routes
+        )
+        parts = [
+            fastest_alternative_text
+            if fastest_alternative_text and fastest_toll_alternative
+            else alternative_text
+        ]
         if alternative_question:
             parts.append(alternative_question)
         return parts
     return []
+
+
+def _route_has_alias(route: dict[str, Any], alias: str) -> bool:
+    aliases = route.get("alias") or []
+    return isinstance(aliases, list) and alias in {
+        str(route_alias).lower() for route_alias in aliases
+    }
 
 
 def _select_route(
