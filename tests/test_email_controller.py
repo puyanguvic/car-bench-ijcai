@@ -203,6 +203,26 @@ def email_route_energy_tools() -> list[dict]:
     ]
 
 
+def email_weather_tools() -> list[dict]:
+    return email_tools() + [
+        fake_tool(
+            "get_location_id_by_location_name",
+            {"location": {"type": "string"}},
+            ["location"],
+        ),
+        fake_tool(
+            "get_weather",
+            {
+                "location_or_poi_id": {"type": "string"},
+                "month": {"type": "integer"},
+                "day": {"type": "integer"},
+                "time_hour_24hformat": {"type": "integer"},
+            },
+            ["location_or_poi_id", "month", "day", "time_hour_24hformat"],
+        ),
+    ]
+
+
 def test_contact_lookup_refuses_when_search_tool_missing() -> None:
     controller = PolicyAwareController()
 
@@ -792,6 +812,186 @@ def test_email_controller_confirms_charging_stop_email_to_meeting_attendees() ->
                     "Best regards"
                 ),
             },
+        }
+    ]
+
+
+def test_email_controller_checks_weather_before_meeting_attendee_weather_email() -> None:
+    controller = PolicyAwareController()
+    tools = email_weather_tools()
+    messages = system_messages()
+
+    action = controller.decide(
+        context_id="ctx-weather-attendee-email",
+        messages=messages,
+        tools=tools,
+        latest_user_text=(
+            "Can you check the weather for Harbor Bay at 3:30 PM today? "
+            "After that, please send an email to the attendees of the Launch "
+            "Review meeting about the weather and travel."
+        ),
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_entries_from_calendar",
+            "arguments": {"month": 1, "day": 20},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-weather-attendee-email",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[tool_result("get_entries_from_calendar", attendee_calendar())],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_contact_information",
+            "arguments": {"contact_ids": ["con_alpha", "con_beta"]},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-weather-attendee-email",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_contact_information", attendee_contact_info())
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_location_id_by_location_name",
+            "arguments": {"location": "Harbor Bay"},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-weather-attendee-email",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_location_id_by_location_name", {"id": "loc_harbor_bay"})
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_weather",
+            "arguments": {
+                "location_or_poi_id": "loc_harbor_bay",
+                "month": 1,
+                "day": 20,
+                "time_hour_24hformat": 15,
+            },
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-weather-attendee-email",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result(
+                "get_weather",
+                {"current_slot": {"condition": "cloudy_and_rain", "temperature": 6}},
+            )
+        ],
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "please confirm these email details" in action.content.lower()
+    assert "avery.stone@example.com" in action.content
+    assert "blair.reed@example.com" in action.content
+    assert "cloudy and rain" in action.content
+    assert "6 C" in action.content
+
+    action = controller.decide(
+        context_id="ctx-weather-attendee-email",
+        messages=messages,
+        tools=tools,
+        latest_user_text="Yes, send it.",
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "send_email",
+            "arguments": {
+                "email_addresses": [
+                    "avery.stone@example.com",
+                    "blair.reed@example.com",
+                ],
+                "content_message": (
+                    "Hi team,\n\n"
+                    "I wanted to share a weather update for our Launch Review "
+                    "meeting in Harbor Bay today at 15:30. The forecast shows "
+                    "cloudy and rain. The temperature is expected to be around "
+                    "6 C.\n\n"
+                    "Please plan accordingly for travel, allow extra time, and "
+                    "bring suitable weather protection if needed.\n\n"
+                    "Best regards"
+                ),
+            },
+        }
+    ]
+
+
+def test_email_controller_uses_selected_meeting_location_for_weather_email() -> None:
+    controller = PolicyAwareController()
+    tools = email_weather_tools()
+    messages = system_messages()
+
+    controller.decide(
+        context_id="ctx-weather-attendee-email-selected-meeting",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[tool_result("get_entries_from_calendar", attendee_calendar())],
+    )
+
+    action = controller.decide(
+        context_id="ctx-weather-attendee-email-selected-meeting",
+        messages=messages,
+        tools=tools,
+        latest_user_text=(
+            "Can you send an email to the attendees of that meeting, letting "
+            "them know about the weather in Harbor Bay and how it might affect "
+            "their travel and the meeting?"
+        ),
+    )
+    assert action is not None
+    assert action.action == "respond"
+    assert "which meeting" in action.content.lower()
+
+    action = controller.decide(
+        context_id="ctx-weather-attendee-email-selected-meeting",
+        messages=messages,
+        tools=tools,
+        latest_user_text="The Launch Review meeting at 3:30 PM.",
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_contact_information",
+            "arguments": {"contact_ids": ["con_alpha", "con_beta"]},
+        }
+    ]
+
+    action = controller.decide(
+        context_id="ctx-weather-attendee-email-selected-meeting",
+        messages=messages,
+        tools=tools,
+        latest_tool_results=[
+            tool_result("get_contact_information", attendee_contact_info())
+        ],
+    )
+    assert action is not None
+    assert action.tool_calls == [
+        {
+            "tool_name": "get_location_id_by_location_name",
+            "arguments": {"location": "Harbor Bay"},
         }
     ]
 

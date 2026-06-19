@@ -185,6 +185,14 @@ class FanSpeedFlow:
 
 
 @dataclass
+class CabinTemperatureFlow:
+    active: bool = False
+    target_temperature: float | None = None
+    seat_zone: Literal["ALL_ZONES", "DRIVER", "PASSENGER"] = "ALL_ZONES"
+    completed: bool = False
+
+
+@dataclass
 class SteeringWheelHeatingFlow:
     active: bool = False
     level: int | None = None
@@ -212,12 +220,15 @@ class OccupancyComfortFlow:
     active: bool = False
     seats_checked: bool = False
     seats_occupied: dict[str, bool] = field(default_factory=dict)
+    needs_temperature: bool = False
     target_temperature: float | None = None
     target_heating_level: int | None = None
     heating_delta: int | None = None
     seat_heating_checked: bool = False
     seat_heating_driver: int | None = None
     seat_heating_passenger: int | None = None
+    turn_off_unoccupied: bool = False
+    unoccupied_heating_set: bool = False
     preferences_checked: bool = False
     steering_wheel_requested: bool = False
     steering_wheel_level: int | None = None
@@ -428,7 +439,17 @@ class EmailFlow:
     meeting_started: bool | None = None
     meeting_start_hour: int | None = None
     meeting_start_minute: int | None = None
+    meeting_location_name: str | None = None
     user_claimed_late: bool = False
+    weather_requested: bool = False
+    weather_checked: bool = False
+    weather_location_name: str | None = None
+    weather_location_id: str | None = None
+    weather_location_lookup_attempted: bool = False
+    weather_hour: int | None = None
+    weather_minute: int | None = None
+    weather_condition: str | None = None
+    weather_temperature: float | None = None
     pending_lookup_role: Literal["recipient", "subject"] | None = None
     pending_contact_matches: dict[str, str] = field(default_factory=dict)
     preferences_checked: bool = False
@@ -499,6 +520,9 @@ class ControllerState:
     air_conditioning: AirConditioningFlow = field(default_factory=AirConditioningFlow)
     air_quality: AirQualityFlow = field(default_factory=AirQualityFlow)
     fan_speed: FanSpeedFlow = field(default_factory=FanSpeedFlow)
+    cabin_temperature: CabinTemperatureFlow = field(
+        default_factory=CabinTemperatureFlow
+    )
     steering_wheel_heating: SteeringWheelHeatingFlow = field(
         default_factory=SteeringWheelHeatingFlow
     )
@@ -532,6 +556,8 @@ class ControllerState:
     pending_location_lookup_name: str | None = None
     recent_location_lookup_name: str | None = None
     recent_location_lookup_id: str | None = None
+    recent_driver_temperature: float | None = None
+    recent_passenger_temperature: float | None = None
     recent_charging_pois: list[dict[str, Any]] = field(default_factory=list)
     recent_charging_route_id: str | None = None
     recent_charging_at_kilometer: float | None = None
@@ -605,6 +631,8 @@ class PolicyAwareController:
             action = self._next_air_quality_action(state, tool_index)
         elif state.fan_speed.active:
             action = self._next_fan_speed_action(state, tool_index)
+        elif state.cabin_temperature.active:
+            action = self._next_cabin_temperature_action(state, tool_index)
         elif state.steering_wheel_heating.active:
             action = self._next_steering_wheel_heating_action(state, tool_index)
         elif state.climate_inspection.active:
@@ -703,6 +731,7 @@ class PolicyAwareController:
             state.air_conditioning.active and not state.air_conditioning.completed,
             state.air_circulation.active and not state.air_circulation.completed,
             state.fan_speed.active and not state.fan_speed.completed,
+            state.cabin_temperature.active and not state.cabin_temperature.completed,
             state.steering_wheel_heating.active
             and not state.steering_wheel_heating.completed,
             state.climate_inspection.active
@@ -730,6 +759,8 @@ class PolicyAwareController:
             state.air_conditioning = AirConditioningFlow()
         if state.fan_speed.completed:
             state.fan_speed = FanSpeedFlow()
+        if state.cabin_temperature.completed:
+            state.cabin_temperature = CabinTemperatureFlow()
         if state.steering_wheel_heating.completed:
             state.steering_wheel_heating = SteeringWheelHeatingFlow()
         if state.climate_inspection.completed:
@@ -764,6 +795,8 @@ class PolicyAwareController:
             state.air_conditioning = AirConditioningFlow()
         if state.fan_speed.completed:
             state.fan_speed = FanSpeedFlow()
+        if state.cabin_temperature.completed:
+            state.cabin_temperature = CabinTemperatureFlow()
         if state.steering_wheel_heating.completed:
             state.steering_wheel_heating = SteeringWheelHeatingFlow()
         if state.climate_inspection.completed:
@@ -852,6 +885,12 @@ class PolicyAwareController:
                 state.pending_direct_response = response
                 return
 
+        if _is_child_seat_heating_status_query(lowered):
+            response = _format_child_seat_heating_status(state.occupancy_comfort)
+            if response is not None:
+                state.pending_direct_response = response
+                return
+
         quoted_meeting = _extract_quoted_meeting_topic(text)
         if quoted_meeting is not None:
             state.recent_meeting_topic = quoted_meeting
@@ -905,6 +944,7 @@ class PolicyAwareController:
                 return
 
         if email.active and email.mode == "meeting_attendees":
+            _update_email_weather_request_from_text(email, text)
             if email.calendar_checked and not email.attendee_contact_ids:
                 selected = _select_meeting_from_text(
                     state.recent_calendar_meetings, text
@@ -916,6 +956,7 @@ class PolicyAwareController:
                 email.attendee_contact_ids
                 and _email_attendee_addresses(email)
                 and email.content_message is None
+                and not email.weather_requested
                 and not _is_affirmative(lowered)
                 and not _is_negative(lowered)
             ):
@@ -1041,7 +1082,11 @@ class PolicyAwareController:
                 return
 
         if state.occupancy_comfort.active:
-            clarified_temperature = _extract_temperature_setting(lowered)
+            clarified_temperature = _resolve_temperature_setting(
+                lowered,
+                state,
+                _extract_temperature_seat_zone(lowered),
+            )
             clarified_level = _extract_heating_level(lowered)
             clarified_delta = _extract_heating_delta(lowered)
             updated = False
@@ -1056,7 +1101,9 @@ class PolicyAwareController:
                 clarified_temperature is not None
                 and state.occupancy_comfort.target_temperature is None
             ):
+                state.occupancy_comfort.needs_temperature = True
                 state.occupancy_comfort.target_temperature = clarified_temperature
+                state.occupancy_comfort.completed = False
                 updated = True
             if (
                 clarified_delta is not None
@@ -1079,7 +1126,11 @@ class PolicyAwareController:
             state.driver_comfort_temperature.active
             and state.driver_comfort_temperature.target_temperature is None
         ):
-            clarified_temperature = _extract_temperature_setting(lowered)
+            clarified_temperature = _resolve_temperature_setting(
+                lowered,
+                state,
+                "DRIVER",
+            )
             if clarified_temperature is not None:
                 state.driver_comfort_temperature.target_temperature = (
                     clarified_temperature
@@ -1278,14 +1329,24 @@ class PolicyAwareController:
         elif _is_passenger_comfort_match_request(lowered):
             state.passenger_comfort_match = PassengerComfortMatchFlow(
                 active=True,
-                target_temperature=_extract_temperature_setting(lowered),
+                target_temperature=_resolve_temperature_setting(
+                    lowered,
+                    state,
+                    "PASSENGER",
+                ),
             )
         elif _is_occupancy_comfort_request(lowered):
             state.occupancy_comfort = OccupancyComfortFlow(
                 active=True,
-                target_temperature=_extract_temperature_setting(lowered),
+                needs_temperature=_occupancy_comfort_needs_temperature(lowered),
+                target_temperature=_resolve_temperature_setting(
+                    lowered,
+                    state,
+                    _extract_temperature_seat_zone(lowered),
+                ),
                 target_heating_level=_extract_seat_heating_target_level(lowered),
                 heating_delta=_extract_heating_delta(lowered),
+                turn_off_unoccupied=_requests_unoccupied_seat_heating_off(lowered),
                 steering_wheel_requested="steering wheel" in lowered,
                 steering_wheel_level=_extract_steering_wheel_heating_level(lowered),
             )
@@ -1293,7 +1354,11 @@ class PolicyAwareController:
             state.driver_comfort_temperature = DriverComfortTemperatureFlow(
                 active=True,
                 passenger_heating_required=_requests_passenger_heating_off(lowered),
-                target_temperature=_extract_temperature_setting(lowered),
+                target_temperature=_resolve_temperature_setting(
+                    lowered,
+                    state,
+                    "DRIVER",
+                ),
             )
         elif _is_climate_inspection_request(lowered):
             state.climate_inspection = ClimateInspectionFlow(
@@ -1309,6 +1374,16 @@ class PolicyAwareController:
             state.fan_speed = FanSpeedFlow(
                 active=True,
                 level=0 if _is_light_off_request(lowered) else _extract_level(lowered),
+            )
+        elif _is_cabin_temperature_request(lowered):
+            state.cabin_temperature = CabinTemperatureFlow(
+                active=True,
+                target_temperature=_resolve_temperature_setting(
+                    lowered,
+                    state,
+                    _extract_temperature_seat_zone(lowered),
+                ),
+                seat_zone=_extract_temperature_seat_zone(lowered),
             )
         elif _is_steering_wheel_heating_request(lowered):
             state.steering_wheel_heating = SteeringWheelHeatingFlow(
@@ -1494,6 +1569,19 @@ class PolicyAwareController:
                     state.fog_lights.weather_condition = condition
                 if state.fog_lights.active:
                     state.fog_lights.weather_checked = True
+                if state.email.active and state.email.weather_requested:
+                    state.email.weather_checked = True
+                    weather_condition, weather_temperature = _extract_weather_summary(
+                        result
+                    )
+                    if weather_condition is not None:
+                        state.email.weather_condition = weather_condition
+                    if weather_temperature is not None:
+                        state.email.weather_temperature = weather_temperature
+            elif name == "get_weather" and state.email.active:
+                state.email.failure_message = (
+                    "I couldn't check the meeting weather, so I can't send a reliable weather update."
+                )
             elif name == "get_user_preferences" and isinstance(result, dict):
                 state.sunroof.preferences_checked = True
                 preferred = _extract_preferred_sunroof_percentage(result)
@@ -1617,6 +1705,8 @@ class PolicyAwareController:
                     result.get("climate_temperature_passenger"),
                     climate.passenger_temperature,
                 )
+                state.recent_driver_temperature = climate.driver_temperature
+                state.recent_passenger_temperature = climate.passenger_temperature
                 unit = result.get("temperature_unit")
                 if isinstance(unit, str) and unit.strip():
                     climate.temperature_unit = unit.strip()
@@ -1831,6 +1921,14 @@ class PolicyAwareController:
                             else level
                         )
             elif name == "set_climate_temperature" and isinstance(result, dict):
+                if state.cabin_temperature.active:
+                    state.cabin_temperature.completed = True
+                    temperature = _safe_float(
+                        result.get("temperature"),
+                        state.cabin_temperature.target_temperature,
+                    )
+                    if temperature is not None:
+                        state.cabin_temperature.target_temperature = temperature
                 if state.occupancy_comfort.active:
                     state.occupancy_comfort.temperature_set = True
                     temperature = _safe_float(
@@ -1859,12 +1957,22 @@ class PolicyAwareController:
                         state.passenger_comfort_match.target_temperature = temperature
             elif name == "set_seat_heating" and isinstance(result, dict):
                 if state.occupancy_comfort.active:
-                    state.occupancy_comfort.seat_heating_set = True
+                    seat_zone = result.get("seat_zone")
                     level = _safe_int(
                         result.get("level"),
                         state.occupancy_comfort.target_heating_level,
                     )
-                    if level is not None:
+                    unoccupied_adjustment = (
+                        level == 0
+                        and _seat_zone_is_unoccupied_front(
+                            state.occupancy_comfort, seat_zone
+                        )
+                    )
+                    if unoccupied_adjustment:
+                        state.occupancy_comfort.unoccupied_heating_set = True
+                    else:
+                        state.occupancy_comfort.seat_heating_set = True
+                    if level is not None and not unoccupied_adjustment:
                         state.occupancy_comfort.target_heating_level = level
                 if state.driver_comfort_temperature.active:
                     seat_zone = result.get("seat_zone")
@@ -1987,6 +2095,15 @@ class PolicyAwareController:
                             state.pending_location_lookup_name
                         )
                         state.recent_location_lookup_id = result["id"]
+                        if (
+                            state.email.active
+                            and state.email.weather_requested
+                            and _locations_match(
+                                state.email.weather_location_name,
+                                state.pending_location_lookup_name,
+                            )
+                        ):
+                            state.email.weather_location_id = result["id"]
                         state.pending_location_lookup_name = None
                     if state.poi.active and state.poi.location_id is None:
                         state.poi.location_id = result["id"]
@@ -2000,6 +2117,12 @@ class PolicyAwareController:
                             state.navigation.new_waypoint_id = result["id"]
                         else:
                             state.navigation.destination_id = result["id"]
+                elif (
+                    state.email.active
+                    and state.email.weather_requested
+                    and state.pending_location_lookup_name
+                ):
+                    state.pending_location_lookup_name = None
                 elif state.poi.active and state.poi.location_id is None:
                     location = state.poi.location_name or "that location"
                     state.poi.failure_message = f"I couldn't find {location}."
@@ -2956,6 +3079,49 @@ class PolicyAwareController:
             reason="steering_wheel_heating_set",
         )
 
+    def _next_cabin_temperature_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        temperature = state.cabin_temperature
+
+        if temperature.completed:
+            state.cabin_temperature = CabinTemperatureFlow()
+            return NextAction.respond(
+                "Done, I set the cabin temperature to "
+                f"{_format_temperature_target(temperature.target_temperature)}.",
+                reason="cabin_temperature_done",
+            )
+
+        if temperature.target_temperature is None:
+            return NextAction.respond(
+                "What cabin temperature should I set?",
+                reason="cabin_temperature_disambiguation",
+            )
+
+        if not tool_index.has("set_climate_temperature"):
+            temperature.completed = True
+            return NextAction.respond(
+                "I can't set the cabin temperature because that control is unavailable right now.",
+                reason="cabin_temperature_missing_tool",
+            )
+
+        temperature_args = tool_index.arg_names("set_climate_temperature")
+        if "seat_zone" not in temperature_args or "temperature" not in temperature_args:
+            temperature.completed = True
+            return NextAction.respond(
+                "I can't set the cabin temperature because the required temperature controls are unavailable right now.",
+                reason="cabin_temperature_missing_parameter",
+            )
+
+        return NextAction.tool_call(
+            "set_climate_temperature",
+            {
+                "seat_zone": temperature.seat_zone,
+                "temperature": temperature.target_temperature,
+            },
+            reason="cabin_temperature_set",
+        )
+
     def _next_climate_inspection_action(
         self, state: ControllerState, tool_index: ToolIndex
     ) -> NextAction | None:
@@ -3016,11 +3182,15 @@ class PolicyAwareController:
     ) -> NextAction | None:
         comfort = state.occupancy_comfort
 
+        if comfort.completed:
+            state.occupancy_comfort = OccupancyComfortFlow()
+            return None
+
         if comfort.heating_delta is not None and not comfort.seat_heating_checked:
             if not tool_index.has("get_seat_heating_level"):
                 comfort.completed = True
                 return NextAction.respond(
-                    "I can't check the current seat heating levels, so I can't increase them by the requested amount.",
+                    "I can't check the current seat heating levels, so I can't adjust seat heating by occupancy reliably.",
                     reason="occupancy_comfort_missing_seat_heating_check",
                 )
             return NextAction.tool_call(
@@ -3040,6 +3210,18 @@ class PolicyAwareController:
                 reason="occupancy_comfort_occupancy_check",
             )
 
+        if comfort.turn_off_unoccupied and not comfort.seat_heating_checked:
+            if not tool_index.has("get_seat_heating_level"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't check the current seat heating levels, so I can't adjust seat heating by occupancy reliably.",
+                    reason="occupancy_comfort_missing_seat_heating_check",
+                )
+            return NextAction.tool_call(
+                "get_seat_heating_level",
+                reason="occupancy_comfort_seat_heating_check",
+            )
+
         if not comfort.seats_occupied:
             comfort.completed = True
             return NextAction.respond(
@@ -3047,7 +3229,7 @@ class PolicyAwareController:
                 reason="occupancy_comfort_missing_occupancy_result",
             )
 
-        if comfort.target_temperature is None:
+        if comfort.needs_temperature and comfort.target_temperature is None:
             if not comfort.preferences_checked and tool_index.has(
                 "get_user_preferences"
             ):
@@ -3081,7 +3263,11 @@ class PolicyAwareController:
                 reason="occupancy_comfort_heating_level_disambiguation",
             )
 
-        if not comfort.temperature_set:
+        if (
+            comfort.needs_temperature
+            and not comfort.turn_off_unoccupied
+            and not comfort.temperature_set
+        ):
             if not tool_index.has("set_climate_temperature"):
                 comfort.completed = True
                 return NextAction.respond(
@@ -3104,6 +3290,30 @@ class PolicyAwareController:
                 reason="occupancy_comfort_set_temperature",
             )
 
+        if comfort.turn_off_unoccupied and not comfort.unoccupied_heating_set:
+            if not tool_index.has("set_seat_heating"):
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't turn off seat heating for unoccupied seats because that control is unavailable right now.",
+                    reason="occupancy_comfort_missing_seat_heating_tool",
+                )
+            seat_args = tool_index.arg_names("set_seat_heating")
+            if "seat_zone" not in seat_args or "level" not in seat_args:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't adjust seat heating by occupied seat because the required seat heating controls are unavailable right now.",
+                    reason="occupancy_comfort_missing_seat_heating_parameter",
+                )
+            unoccupied_zone = _unoccupied_front_seat_heating_zone(comfort)
+            if unoccupied_zone is None:
+                comfort.unoccupied_heating_set = True
+            else:
+                return NextAction.tool_call(
+                    "set_seat_heating",
+                    {"seat_zone": unoccupied_zone, "level": 0},
+                    reason="occupancy_comfort_turn_off_unoccupied_heating",
+                )
+
         if not comfort.seat_heating_set:
             if not tool_index.has("set_seat_heating"):
                 comfort.completed = True
@@ -3122,18 +3332,38 @@ class PolicyAwareController:
                 comfort.seats_occupied
             )
             if seat_zone is None:
+                comfort.seat_heating_set = True
+            else:
+                return NextAction.tool_call(
+                    "set_seat_heating",
+                    {
+                        "seat_zone": seat_zone,
+                        "level": comfort.target_heating_level,
+                    },
+                    reason="occupancy_comfort_set_seat_heating",
+                )
+
+        if comfort.needs_temperature and not comfort.temperature_set:
+            if not tool_index.has("set_climate_temperature"):
                 comfort.completed = True
                 return NextAction.respond(
-                    "I can't set seat heating for the occupied seats with the available seat controls.",
-                    reason="occupancy_comfort_no_supported_occupied_seat",
+                    "I can't set the cabin temperature because that control is unavailable right now.",
+                    reason="occupancy_comfort_missing_temperature_tool",
+                )
+            temperature_args = tool_index.arg_names("set_climate_temperature")
+            if "seat_zone" not in temperature_args or "temperature" not in temperature_args:
+                comfort.completed = True
+                return NextAction.respond(
+                    "I can't set the cabin temperature because the required temperature controls are unavailable right now.",
+                    reason="occupancy_comfort_missing_temperature_parameter",
                 )
             return NextAction.tool_call(
-                "set_seat_heating",
+                "set_climate_temperature",
                 {
-                    "seat_zone": seat_zone,
-                    "level": comfort.target_heating_level,
+                    "seat_zone": "ALL_ZONES",
+                    "temperature": comfort.target_temperature,
                 },
-                reason="occupancy_comfort_set_seat_heating",
+                reason="occupancy_comfort_set_temperature",
             )
 
         if comfort.steering_wheel_requested and not comfort.steering_wheel_set:
@@ -3160,11 +3390,15 @@ class PolicyAwareController:
             )
 
         comfort.completed = True
-        completed = [
-            "set the cabin temperature to "
-            f"{_format_temperature_target(comfort.target_temperature)}",
-            "adjusted seat heating for the occupied seats",
-        ]
+        completed = ["adjusted seat heating for the occupied seats"]
+        if comfort.turn_off_unoccupied:
+            completed.insert(0, "turned off seat heating for unoccupied front seats")
+        if comfort.needs_temperature:
+            completed.insert(
+                0,
+                "set the cabin temperature to "
+                f"{_format_temperature_target(comfort.target_temperature)}",
+            )
         if comfort.steering_wheel_requested:
             level = (
                 comfort.steering_wheel_level
@@ -3609,6 +3843,32 @@ class PolicyAwareController:
             return NextAction.respond(
                 "I can't send the email because I couldn't find the recipient's email address.",
                 reason="email_missing_recipient_address",
+            )
+
+        if email.weather_requested and not email.weather_checked:
+            if not tool_index.has("get_weather"):
+                return NextAction.respond(
+                    "I can't check the weather for the meeting because weather lookup is unavailable right now.",
+                    reason="email_missing_weather_tool",
+                )
+            if _email_weather_needs_location_lookup(state, email, tool_index):
+                state.pending_location_lookup_name = email.weather_location_name
+                email.weather_location_lookup_attempted = True
+                return NextAction.tool_call(
+                    "get_location_id_by_location_name",
+                    {"location": email.weather_location_name},
+                    reason="email_weather_location_lookup",
+                )
+            weather_args = _email_weather_arguments(state, email, tool_index)
+            if weather_args is None:
+                return NextAction.respond(
+                    "I need the meeting location and time before I can check the weather.",
+                    reason="email_missing_weather_context",
+                )
+            return NextAction.tool_call(
+                "get_weather",
+                weather_args,
+                reason="email_weather_lookup",
             )
 
         if (
@@ -5175,12 +5435,18 @@ def _is_email_composition_request(text: str) -> bool:
 def _new_meeting_attendees_email_flow(
     text: str, state: ControllerState
 ) -> EmailFlow:
+    weather_requested = _is_weather_meeting_attendees_email_request(text)
+    weather_hour, weather_minute = _extract_email_weather_time(text)
     return EmailFlow(
         active=True,
         mode="meeting_attendees",
         meeting_topic=_extract_meeting_topic_for_attendees_email(text),
         calendar_checked=bool(state.recent_calendar_meetings),
         content_message=_extract_meeting_attendees_email_content(text, state),
+        weather_requested=weather_requested,
+        weather_location_name=_extract_email_weather_location(text),
+        weather_hour=weather_hour,
+        weather_minute=weather_minute,
     )
 
 
@@ -5255,6 +5521,59 @@ def _extract_meeting_attendees_email_content(
         f"I may be slightly delayed for the {topic} meeting.\n\n"
         "Best regards"
     )
+
+
+def _is_weather_meeting_attendees_email_request(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "weather" in lowered
+        and "email" in lowered
+        and "meeting" in lowered
+        and any(word in lowered for word in ("attendees", "participants", "team"))
+    )
+
+
+def _update_email_weather_request_from_text(email: EmailFlow, text: str) -> None:
+    if not _is_weather_meeting_attendees_email_request(text):
+        return
+    email.weather_requested = True
+    location = _extract_email_weather_location(text)
+    if location is not None:
+        email.weather_location_name = location
+    hour, minute = _extract_email_weather_time(text)
+    if hour is not None:
+        email.weather_hour = hour
+        email.weather_minute = minute
+
+
+def _extract_email_weather_location(text: str) -> str | None:
+    patterns = (
+        r"\bweather\s+(?:for|in|at)\s+([A-Z][A-Za-z .'-]+?)(?:\s+at\b|\s+today\b|\s+tomorrow\b|[,.?!;]|$)",
+        r"\bconditions\s+(?:for|in|at)\s+([A-Z][A-Za-z .'-]+?)(?:\s+at\b|\s+today\b|\s+tomorrow\b|[,.?!;]|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            location = _clean_location_query(match.group(1))
+            if location:
+                return location
+    return None
+
+
+def _extract_email_weather_time(text: str) -> tuple[int | None, int | None]:
+    match = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", text, re.I)
+    if not match:
+        return None, None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or "0")
+    suffix = match.group(3)
+    if suffix:
+        suffix = suffix.lower()
+        if suffix == "pm" and hour != 12:
+            hour += 12
+        elif suffix == "am" and hour == 12:
+            hour = 0
+    return hour, minute
 
 
 def _recent_charging_stop_email_context(
@@ -5618,7 +5937,58 @@ def _build_email_content(state: ControllerState) -> str | None:
             "Best regards"
         )
 
+    if email.mode == "meeting_attendees" and email.weather_requested:
+        if not email.weather_checked:
+            return None
+        return _build_weather_meeting_email_content(email)
+
     return None
+
+
+def _build_weather_meeting_email_content(email: EmailFlow) -> str:
+    topic = email.meeting_topic or "the meeting"
+    location = email.weather_location_name or email.meeting_location_name or "the meeting location"
+    time_text = _format_clock_time(email.weather_hour, email.weather_minute)
+    condition_text = _format_weather_condition(email.weather_condition)
+    temperature_text = ""
+    if email.weather_temperature is not None:
+        temperature_text = f" The temperature is expected to be around {email.weather_temperature:g} C."
+
+    impact = _weather_travel_impact(email.weather_condition)
+    return (
+        "Hi team,\n\n"
+        f"I wanted to share a weather update for our {topic} meeting in {location} "
+        f"today at {time_text}. The forecast shows {condition_text}."
+        f"{temperature_text}\n\n"
+        f"{impact}\n\n"
+        "Best regards"
+    )
+
+
+def _format_weather_condition(condition: str | None) -> str:
+    if condition is None:
+        return "the available weather conditions"
+    return condition.replace("_", " ").strip().lower()
+
+
+def _weather_travel_impact(condition: str | None) -> str:
+    normalized = (condition or "").casefold()
+    if any(term in normalized for term in ("rain", "snow", "hail", "storm")):
+        return (
+            "Please plan accordingly for travel, allow extra time, and bring suitable "
+            "weather protection if needed."
+        )
+    if "fog" in normalized:
+        return (
+            "Please allow extra travel time because visibility may be reduced on the "
+            "way to the meeting."
+        )
+    if "cloud" in normalized:
+        return (
+            "Please keep the cloudy conditions in mind while planning your travel to "
+            "the meeting."
+        )
+    return "Please keep the forecast in mind while planning your travel to the meeting."
 
 
 def _format_email_confirmation(email: EmailFlow, extra_recipients: list[str]) -> str:
@@ -5669,6 +6039,15 @@ def _record_email_attendee_meeting(
     if isinstance(start, dict):
         email.meeting_start_hour = _safe_int(start.get("hour"))
         email.meeting_start_minute = _safe_int(start.get("minute"), 0)
+        if email.weather_requested and email.weather_hour is None:
+            email.weather_hour = email.meeting_start_hour
+            email.weather_minute = email.meeting_start_minute
+
+    location = meeting.get("location")
+    if isinstance(location, str) and location.strip():
+        email.meeting_location_name = location.strip()
+        if email.weather_requested:
+            email.weather_location_name = location.strip()
 
     attendees = meeting.get("attendees")
     if isinstance(attendees, list):
@@ -6137,12 +6516,20 @@ def _mentions_temperature_setting(text: str) -> bool:
 
 
 def _extract_temperature_setting(text: str) -> float | None:
-    degree_match = re.search(
-        r"\b([1-3]?\d(?:\.\d+)?)\s*(?:degree|degrees|celsius|c)\b",
+    final_match = re.search(
+        r"\b(?:would be|should be|to|at)\s*([1-3]?\d(?:\.\d+)?)\s*"
+        r"(?:degree|degrees|celsius|c)\b",
         text,
     )
-    if degree_match:
+    if final_match:
+        return float(final_match.group(1))
+
+    degree_match = _first_absolute_temperature_match(text)
+    if degree_match is not None:
         return float(degree_match.group(1))
+
+    if _extract_temperature_delta(text) is not None:
+        return None
 
     temperature_match = re.search(
         r"\b(?:temperature|temp)[^.?!,;]*?\b([1-3]?\d(?:\.\d+)?)\b",
@@ -6152,6 +6539,108 @@ def _extract_temperature_setting(text: str) -> float | None:
         return float(temperature_match.group(1))
 
     return None
+
+
+def _first_absolute_temperature_match(text: str) -> re.Match[str] | None:
+    for degree_match in re.finditer(
+        r"\b([1-3]?\d(?:\.\d+)?)\s*(?:degree|degrees|celsius|c)\b",
+        text,
+    ):
+        prefix = text[max(0, degree_match.start() - 24) : degree_match.start()]
+        if re.search(
+            r"\b(?:by|raise|raised|increase|increased|lower|lowered|decrease|"
+            r"decreased|up|down|current|currently|already|now|is)\s*$",
+            prefix,
+        ):
+            continue
+        return degree_match
+    return None
+
+
+def _extract_temperature_delta(text: str) -> float | None:
+    increase_match = re.search(
+        r"\b(?:raise|increase|turn up|bump up|warm up)[^.?!;]*?\bby\s+"
+        r"([1-3]?\d(?:\.\d+)?)\s*(?:degree|degrees|celsius|c)\b",
+        text,
+    )
+    if increase_match:
+        return float(increase_match.group(1))
+
+    decrease_match = re.search(
+        r"\b(?:lower|decrease|turn down|cool down)[^.?!;]*?\bby\s+"
+        r"([1-3]?\d(?:\.\d+)?)\s*(?:degree|degrees|celsius|c)\b",
+        text,
+    )
+    if decrease_match:
+        return -float(decrease_match.group(1))
+    return None
+
+
+def _resolve_temperature_setting(
+    text: str,
+    state: ControllerState,
+    seat_zone: Literal["ALL_ZONES", "DRIVER", "PASSENGER"] = "ALL_ZONES",
+) -> float | None:
+    target = _extract_temperature_setting(text)
+    if target is not None:
+        return target
+
+    delta = _extract_temperature_delta(text)
+    if delta is None:
+        return None
+    base = _recent_temperature_for_zone(state, seat_zone)
+    if base is None:
+        return None
+    return base + delta
+
+
+def _recent_temperature_for_zone(
+    state: ControllerState,
+    seat_zone: Literal["ALL_ZONES", "DRIVER", "PASSENGER"],
+) -> float | None:
+    if seat_zone == "DRIVER":
+        return state.recent_driver_temperature
+    if seat_zone == "PASSENGER":
+        return state.recent_passenger_temperature
+    temperatures = [
+        temperature
+        for temperature in (
+            state.recent_driver_temperature,
+            state.recent_passenger_temperature,
+        )
+        if temperature is not None
+    ]
+    if not temperatures:
+        return None
+    return sum(temperatures) / len(temperatures)
+
+
+def _is_cabin_temperature_request(text: str) -> bool:
+    if _extract_temperature_setting(text) is None:
+        return False
+    if _is_climate_inspection_request(text):
+        return False
+    if re.search(r"\b(what|tell me|check|current)\b", text):
+        return False
+    return bool(
+        "cabin temperature" in text
+        or "climate temperature" in text
+        or "all zones" in text
+        or "driver temperature" in text
+        or "passenger temperature" in text
+        or "driver side temperature" in text
+        or "passenger side temperature" in text
+    )
+
+
+def _extract_temperature_seat_zone(
+    text: str,
+) -> Literal["ALL_ZONES", "DRIVER", "PASSENGER"]:
+    if "passenger" in text and "all zones" not in text:
+        return "PASSENGER"
+    if "driver" in text and "all zones" not in text:
+        return "DRIVER"
+    return "ALL_ZONES"
 
 
 def _mentions_seat_heating(text: str) -> bool:
@@ -6202,6 +6691,59 @@ def _is_occupancy_comfort_request(text: str) -> bool:
             "seat heating",
             "heated seats",
         )
+    )
+
+
+def _occupancy_comfort_needs_temperature(text: str) -> bool:
+    if _mentions_temperature_setting(text):
+        return True
+    if any(phrase in text for phrase in ("cabin temperature", "climate temperature")):
+        return True
+    if "usual comfortable temperature" in text or "comfort temperature" in text:
+        return True
+    if "comprehensively" in text or "comprehensive" in text:
+        return True
+    if _mentions_seat_heating(text) and not any(
+        phrase in text
+        for phrase in (
+            "warm up the car",
+            "heat up the car",
+            "overall comfort",
+            "comprehensive warming",
+        )
+    ):
+        return False
+    return "warm up" in text or "heat up" in text
+
+
+def _requests_unoccupied_seat_heating_off(text: str) -> bool:
+    return bool(
+        _mentions_seat_heating(text)
+        and any(
+            phrase in text
+            for phrase in (
+                "unoccupied seat",
+                "unoccupied seats",
+                "empty seat",
+                "empty seats",
+                "seats that are not occupied",
+                "not occupied",
+            )
+        )
+        and _is_light_off_request(text)
+    )
+
+
+def _is_child_seat_heating_status_query(text: str) -> bool:
+    if "child" not in text and "kid" not in text:
+        return False
+    if not _mentions_seat_heating(text):
+        return False
+    return bool(
+        "activated" in text
+        or re.search(r"\bon\b", text)
+        or "enabled" in text
+        or "working" in text
     )
 
 
@@ -7617,7 +8159,7 @@ def _clean_location_query(value: str) -> str | None:
     value = value.split(",", 1)[0]
     value = re.split(r"[.?!]\s+", value, maxsplit=1)[0]
     value = re.split(
-        r"\b(?:instead|because|with|without|if|when|that|which|where|for|from|via|then|first|next|now|rather)\b",
+        r"\b(?:instead|because|with|without|if|when|that|which|where|for|from|via|then|first|next|now|rather|and|how|about)\b",
         value,
         maxsplit=1,
         flags=re.IGNORECASE,
@@ -7642,11 +8184,17 @@ def _matching_recent_location_id(
     candidate_name: str | None,
     candidate_id: str | None,
 ) -> str | None:
-    if not requested_name or not candidate_name or not candidate_id:
+    if not candidate_id:
         return None
-    if requested_name.casefold() == candidate_name.casefold():
+    if _locations_match(requested_name, candidate_name):
         return candidate_id
     return None
+
+
+def _locations_match(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    return _normalized_text(left) == _normalized_text(right)
 
 
 def _extract_route_preference(
@@ -8942,6 +9490,64 @@ def _seat_heating_zone_for_occupied_front_seats(
     return None
 
 
+def _unoccupied_front_seat_heating_zone(
+    comfort: OccupancyComfortFlow,
+) -> str | None:
+    driver_unoccupied = comfort.seats_occupied.get("driver") is False
+    passenger_unoccupied = comfort.seats_occupied.get("passenger") is False
+
+    driver_on = comfort.seat_heating_driver is None or comfort.seat_heating_driver > 0
+    passenger_on = (
+        comfort.seat_heating_passenger is None or comfort.seat_heating_passenger > 0
+    )
+
+    if driver_unoccupied and passenger_unoccupied and driver_on and passenger_on:
+        return "ALL_ZONES"
+    if driver_unoccupied and driver_on:
+        return "DRIVER"
+    if passenger_unoccupied and passenger_on:
+        return "PASSENGER"
+    return None
+
+
+def _seat_zone_is_unoccupied_front(
+    comfort: OccupancyComfortFlow, seat_zone: Any
+) -> bool:
+    if seat_zone == "ALL_ZONES":
+        return (
+            comfort.seats_occupied.get("driver") is False
+            and comfort.seats_occupied.get("passenger") is False
+        )
+    if seat_zone == "DRIVER":
+        return comfort.seats_occupied.get("driver") is False
+    if seat_zone == "PASSENGER":
+        return comfort.seats_occupied.get("passenger") is False
+    return False
+
+
+def _format_child_seat_heating_status(
+    comfort: OccupancyComfortFlow,
+) -> str | None:
+    if not comfort.seats_occupied:
+        return None
+    if (
+        comfort.seats_occupied.get("driver_rear") is True
+        or comfort.seats_occupied.get("passenger_rear") is True
+    ):
+        return (
+            "No, the occupied rear seat does not have an available seat-heating "
+            "control, so seat heating is not activated there."
+        )
+    if comfort.seats_occupied.get("passenger") is True:
+        if comfort.target_heating_level is None:
+            return None
+        return (
+            "Yes, passenger seat heating is set to "
+            f"level {comfort.target_heating_level}."
+        )
+    return None
+
+
 def _occupied_front_seat_heating_target(comfort: OccupancyComfortFlow) -> int | None:
     if comfort.heating_delta is None:
         return comfort.target_heating_level
@@ -8987,6 +9593,129 @@ def _weather_arguments(runtime: RuntimeContext) -> dict[str, Any] | None:
     if runtime.minute is not None:
         args["time_minutes"] = runtime.minute
     return args
+
+
+def _email_weather_needs_location_lookup(
+    state: ControllerState, email: EmailFlow, tool_index: ToolIndex
+) -> bool:
+    if email.weather_location_id is not None:
+        return False
+    if email.weather_location_lookup_attempted:
+        return False
+    if email.weather_location_name is None:
+        return False
+    if not tool_index.has("get_location_id_by_location_name"):
+        return False
+
+    recent_id = _matching_recent_location_id(
+        email.weather_location_name,
+        state.recent_location_lookup_name,
+        state.recent_location_lookup_id,
+    )
+    if recent_id is not None:
+        email.weather_location_id = recent_id
+        return False
+
+    weather_args = tool_index.arg_names("get_weather")
+    return not weather_args or "location_or_poi_id" in weather_args
+
+
+def _email_weather_arguments(
+    state: ControllerState, email: EmailFlow, tool_index: ToolIndex
+) -> dict[str, Any] | None:
+    arg_names = tool_index.arg_names("get_weather")
+    include_all = not arg_names
+    location_value = (
+        email.weather_location_id
+        or _matching_recent_location_id(
+            email.weather_location_name,
+            state.recent_location_lookup_name,
+            state.recent_location_lookup_id,
+        )
+        or email.weather_location_name
+        or state.runtime.location_id
+    )
+    month = state.runtime.month
+    day = state.runtime.day
+    hour = email.weather_hour if email.weather_hour is not None else state.runtime.hour
+    minute = (
+        email.weather_minute
+        if email.weather_minute is not None
+        else state.runtime.minute
+    )
+    if location_value is None or month is None or day is None or hour is None:
+        return None
+
+    args: dict[str, Any] = {}
+    if include_all or "location_or_poi_id" in arg_names:
+        args["location_or_poi_id"] = location_value
+    elif "location" in arg_names:
+        args["location"] = email.weather_location_name or location_value
+    else:
+        return None
+
+    if include_all or "month" in arg_names:
+        args["month"] = month
+    if include_all or "day" in arg_names:
+        args["day"] = day
+    if include_all or "time_hour_24hformat" in arg_names:
+        args["time_hour_24hformat"] = hour
+    elif "hour" in arg_names:
+        args["hour"] = hour
+    if minute is not None and (include_all or "time_minutes" in arg_names):
+        args["time_minutes"] = minute
+    return args
+
+
+def _extract_weather_summary(result: dict[str, Any]) -> tuple[str | None, float | None]:
+    slot = _select_weather_slot(result)
+    condition = _weather_field(slot, result, ("condition", "weather_condition"))
+    temperature = _safe_float(
+        _weather_field(
+            slot,
+            result,
+            (
+                "temperature",
+                "temperature_celsius",
+                "temperature_c",
+                "temp",
+                "temp_c",
+            ),
+        )
+    )
+    return condition, temperature
+
+
+def _select_weather_slot(result: dict[str, Any]) -> dict[str, Any]:
+    for key in (
+        "current_slot",
+        "requested_slot",
+        "forecast_slot",
+        "weather",
+        "forecast",
+    ):
+        value = result.get(key)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    return item
+    return {}
+
+
+def _weather_field(
+    slot: dict[str, Any], result: dict[str, Any], names: tuple[str, ...]
+) -> Any:
+    for name in names:
+        value = slot.get(name)
+        if value is not None:
+            return value
+    for name in names:
+        value = result.get(name)
+        if value is not None:
+            return value
+    return None
 
 
 def _requires_weather_confirmation(condition: str | None) -> bool:
