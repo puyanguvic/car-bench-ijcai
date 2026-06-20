@@ -12,7 +12,6 @@ import ast
 import json
 import math
 import re
-import unicodedata
 from typing import Any, Literal
 
 from .actions import NextAction
@@ -74,7 +73,20 @@ from .route_renderer import (
     _select_route,
     _select_toll_aware_route,
 )
+from .text_utils import _normalized_text
 from .tool_index import ToolIndex
+from .tool_parsing import (
+    _parse_tool_call_arguments,
+    _parse_tool_result_content,
+    _tool_argument_available,
+    _tool_result_name,
+)
+from .value_parsing import (
+    _bounded_percentage,
+    _json_number,
+    _safe_float,
+    _safe_int,
+)
 
 
 BAD_SUNROOF_WEATHER = {"rainy", "cloudy_and_rain", "foggy", "snowy"}
@@ -9386,16 +9398,6 @@ def _extract_poi_option_index(text: str) -> int | None:
     return None
 
 
-def _normalized_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value)
-    without_marks = "".join(
-        char for char in normalized if not unicodedata.combining(char)
-    )
-    return " ".join(
-        re.sub(r"[^a-zA-Z0-9]+", " ", without_marks).casefold().split()
-    )
-
-
 def _navigation_route_start_id(
     state: ControllerState,
     navigation: NavigationFlow,
@@ -9792,46 +9794,6 @@ def _is_negative(text: str) -> bool:
         or "don't" in text
         or "do not" in text
     )
-
-
-def _tool_result_name(tool_result: dict[str, Any]) -> str:
-    return (
-        tool_result.get("tool_name")
-        or tool_result.get("toolName")
-        or tool_result.get("name")
-        or ""
-    )
-
-
-def _parse_tool_call_arguments(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if not isinstance(value, str) or not value.strip():
-        return {}
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _parse_tool_result_content(tool_result: dict[str, Any]) -> dict[str, Any]:
-    content = tool_result.get("content", "")
-    if isinstance(content, dict):
-        return content
-    if not isinstance(content, str):
-        return {}
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _tool_argument_available(
-    tool_index: ToolIndex, tool_name: str, argument_name: str
-) -> bool:
-    return argument_name in tool_index.arg_names(tool_name)
 
 
 def _extract_preferred_sunroof_percentage(result: dict[str, Any]) -> int | None:
@@ -10417,14 +10379,6 @@ def _occupied_front_seat_heating_target(comfort: OccupancyComfortFlow) -> int | 
     return max(0, min(3, max(occupied_levels) + comfort.heating_delta))
 
 
-def _bounded_percentage(value: Any) -> int | None:
-    try:
-        number = int(float(value))
-    except (TypeError, ValueError):
-        return None
-    return max(0, min(100, number))
-
-
 def _weather_arguments(runtime: RuntimeContext) -> dict[str, Any] | None:
     if (
         runtime.location_id is None
@@ -10591,25 +10545,3 @@ def _format_percentage(value: float | int | None) -> str:
     if float(value).is_integer():
         return f"{int(value)}%"
     return f"{value}%"
-
-
-def _safe_int(value: Any, default: int | None = None) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_float(value: Any, default: float | None = None) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _json_number(value: float | int | None) -> float | int | None:
-    if isinstance(value, bool) or value is None:
-        return value
-    if float(value).is_integer():
-        return int(value)
-    return float(value)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from .value_parsing import _safe_int
+
 
 def _navigation_completion_message(
     action_summary: str,
@@ -185,8 +187,8 @@ def _select_toll_aware_route(
 
 
 def _route_duration_minutes(route: dict[str, Any]) -> int | None:
-    hours = _safe_int(route.get("duration_hours"), 0) or 0
-    minutes = _safe_int(route.get("duration_minutes"), 0) or 0
+    hours = _safe_int(route.get("duration_hours"), 0, allow_bool=False) or 0
+    minutes = _safe_int(route.get("duration_minutes"), 0, allow_bool=False) or 0
     total = hours * 60 + minutes
     return total if total > 0 else None
 
@@ -266,8 +268,8 @@ def _format_route_alternative_detail_prompt(routes: list[dict[str, Any]]) -> str
 
 def _route_summary(route: dict[str, Any]) -> str:
     distance = route.get("distance_km")
-    hours = _safe_int(route.get("duration_hours"), 0) or 0
-    minutes = _safe_int(route.get("duration_minutes"), 0) or 0
+    hours = _safe_int(route.get("duration_hours"), 0, allow_bool=False) or 0
+    minutes = _safe_int(route.get("duration_minutes"), 0, allow_bool=False) or 0
     via = route.get("name_via")
     parts = []
     if isinstance(via, str) and via:
@@ -347,12 +349,3 @@ def _has_route_alternatives(
 
 def _includes_alternative_route_question(parts: list[str]) -> bool:
     return any("would you like more information" in part.lower() for part in parts)
-
-
-def _safe_int(value: Any, default: int | None = None) -> int | None:
-    if isinstance(value, bool):
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
