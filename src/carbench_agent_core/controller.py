@@ -13,9 +13,9 @@ import json
 import math
 import re
 import unicodedata
-from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .actions import NextAction
 from .flows import (
     AirCirculationFlow,
     AirConditioningFlow,
@@ -80,36 +80,6 @@ from .tool_index import ToolIndex
 BAD_SUNROOF_WEATHER = {"rainy", "cloudy_and_rain", "foggy", "snowy"}
 SAFE_SUNROOF_WEATHER = {"sunny", "cloudy", "partly_cloudy"}
 SAFE_FOG_LIGHT_WEATHER = {"cloudy_and_thunderstorm", "cloudy_and_hail"}
-
-
-@dataclass
-class NextAction:
-    """One benchmark-visible assistant action."""
-
-    action: Literal["respond", "tool_calls"]
-    content: str = ""
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    reason: str = "policy"
-
-    @classmethod
-    def respond(cls, content: str, *, reason: str = "policy") -> "NextAction":
-        return cls(action="respond", content=content, reason=reason)
-
-    @classmethod
-    def tool_call(
-        cls,
-        tool_name: str,
-        arguments: dict[str, Any] | None = None,
-        *,
-        reason: str = "policy",
-    ) -> "NextAction":
-        return cls(
-            action="tool_calls",
-            content="",
-            tool_calls=[{"tool_name": tool_name, "arguments": arguments or {}}],
-            reason=reason,
-        )
-
 
 
 class PolicyAwareController:
