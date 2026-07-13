@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -258,13 +260,17 @@ class CARBenchAgentExecutor(AgentExecutor):
                     action=controlled_action.action,
                     reason=controlled_action.reason,
                     num_tool_calls=len(controlled_action.tool_calls),
+                    pending_obligations=self.policy_controller.pending_obligations(
+                        context.context_id
+                    ),
                 )
                 self._on_policy_controlled_action(
                     context.context_id,
                     controlled_action,
                 )
             else:
-                inference_result = self._call_model_with_retries(
+                inference_result = await asyncio.to_thread(
+                    self._call_model_with_retries,
                     context_id=context.context_id,
                     messages=messages,
                     tools=tools,
@@ -306,7 +312,11 @@ class CARBenchAgentExecutor(AgentExecutor):
         except Exception as exc:
             ctx_logger.error("Cerebras agent error", error=str(exc), exc_info=True)
             response_message = new_message(
-                parts=[new_text_part(f"Error processing request: {str(exc)}")],
+                parts=[
+                    new_text_part(
+                        "I'm sorry, I couldn't process that request safely."
+                    )
+                ],
                 context_id=context.context_id,
                 role=Role.ROLE_AGENT,
             )
@@ -344,6 +354,7 @@ class CARBenchAgentExecutor(AgentExecutor):
                 tools=tools,
                 correction=correction,
             )
+            prompt_sizes = prompt_component_char_counts(messages=messages, tools=tools)
             ctx_logger.debug(
                 "Calling Cerebras executor",
                 attempt=attempt + 1,
@@ -351,6 +362,9 @@ class CARBenchAgentExecutor(AgentExecutor):
                 num_messages=len(messages),
                 num_tools=len(tools),
                 prompt_chars=len(prompt),
+                system_prompt_chars=prompt_sizes["system_prompt_chars"],
+                tool_schema_prompt_chars=prompt_sizes["tool_schema_prompt_chars"],
+                transcript_prompt_chars=prompt_sizes["transcript_prompt_chars"],
                 max_completion_tokens=self.max_completion_tokens,
                 reasoning_effort=self.reasoning_effort,
                 tool_names=[
@@ -652,7 +666,7 @@ def build_next_action_prompt(
 ) -> str:
     prompt = {
         "task": "Choose exactly one next assistant action for this CAR-bench turn.",
-        "available_tools": tools,
+        "available_tools": compact_tools_for_prompt(tools),
         "conversation_transcript": _messages_for_prompt(messages),
         "output_contract": {
             "respond": "Use when speaking naturally to the user.",
@@ -664,6 +678,11 @@ def build_next_action_prompt(
             "If a capability or parameter is unavailable, respond to the user transparently.",
             "If choosing tool_calls, keep content empty and do not explain the tool call.",
             "If asking the user, ask exactly one concrete question.",
+            (
+                "Before responding, verify that every requested subtask and required "
+                "confirmation is complete; otherwise continue with the next tool call "
+                "or one clarifying question."
+            ),
             "If confirming completion, mention only actions actually completed by tool results.",
             "Do not mention schemas, parameter names, evaluator behavior, or hidden implementation details.",
             "Keep user-facing responses short and TTS-friendly.",
@@ -675,9 +694,115 @@ def build_next_action_prompt(
     return json.dumps(prompt, ensure_ascii=False, indent=2)
 
 
+def prompt_component_char_counts(
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Return safe prompt-size telemetry without retaining user content."""
+
+    transcript = _messages_for_prompt(messages)
+    return {
+        "system_prompt_chars": sum(
+            len(item.get("content") or "")
+            for item in transcript
+            if item.get("role") == "system"
+        ),
+        "tool_schema_prompt_chars": len(
+            json.dumps(compact_tools_for_prompt(tools), ensure_ascii=False)
+        ),
+        "transcript_prompt_chars": len(json.dumps(transcript, ensure_ascii=False)),
+    }
+
+
+def compact_tools_for_prompt(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the tool-call contract while removing verbose schema-only metadata.
+
+    The evaluator provides rich tool schemas, including examples and long output
+    descriptions. The agent validates model output against the original schema,
+    so the prompt needs only the callable function names and input constraints.
+    """
+
+    compacted: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        compact_function: dict[str, Any] = {"name": name}
+        if description := _compact_description(function.get("description"), 120):
+            compact_function["description"] = description
+        parameters = function.get("parameters")
+        if isinstance(parameters, dict):
+            compact_function["parameters"] = _compact_json_schema(parameters)
+        compacted.append({"type": "function", "function": compact_function})
+    return compacted
+
+
+def _compact_json_schema(schema: dict[str, Any], *, depth: int = 0) -> dict[str, Any]:
+    """Retain the input constraints required to form a valid tool call."""
+
+    if depth >= 4:
+        schema_type = schema.get("type")
+        return {"type": schema_type} if isinstance(schema_type, str) else {}
+
+    compact: dict[str, Any] = {}
+    for key in ("type", "enum", "minimum", "maximum", "multipleOf", "format"):
+        value = schema.get(key)
+        if value is not None:
+            compact[key] = value
+    required = schema.get("required")
+    if isinstance(required, list):
+        compact["required"] = [item for item in required if isinstance(item, str)]
+    if isinstance(schema.get("additionalProperties"), bool):
+        compact["additionalProperties"] = schema["additionalProperties"]
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        compact["properties"] = {
+            str(name): _compact_json_schema(value, depth=depth + 1)
+            for name, value in properties.items()
+            if isinstance(value, dict)
+        }
+    items = schema.get("items")
+    if isinstance(items, dict):
+        compact["items"] = _compact_json_schema(items, depth=depth + 1)
+    for key in ("anyOf", "oneOf", "allOf"):
+        variants = schema.get(key)
+        if isinstance(variants, list):
+            compact[key] = [
+                _compact_json_schema(value, depth=depth + 1)
+                for value in variants
+                if isinstance(value, dict)
+            ]
+    return compact
+
+
+def _compact_description(value: Any, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split())
+    if not normalized:
+        return None
+    return normalized[:limit]
+
+
 def _messages_for_prompt(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve policy and task origin while bounding growing tool transcripts."""
+
+    max_messages = _prompt_history_max_messages()
+    selected_messages = messages
+    if len(messages) > max_messages:
+        selected_indices = {0}
+        if len(messages) > 1 and messages[1].get("role") == "user":
+            selected_indices.add(1)
+        tail_count = max(max_messages - len(selected_indices), 0)
+        selected_indices.update(range(max(len(messages) - tail_count, 0), len(messages)))
+        selected_messages = [messages[index] for index in sorted(selected_indices)]
+
     rendered = []
-    for message in messages:
+    for message in selected_messages:
         item: dict[str, Any] = {
             "role": message.get("role"),
             "content": message.get("content"),
@@ -697,6 +822,14 @@ def _messages_for_prompt(messages: list[dict[str, Any]]) -> list[dict[str, Any]]
             item["name"] = message.get("name")
         rendered.append(item)
     return rendered
+
+
+def _prompt_history_max_messages() -> int:
+    value = os.getenv("TRACK2_PROMPT_HISTORY_MAX_MESSAGES", "24")
+    try:
+        return max(4, int(value))
+    except ValueError:
+        return 24
 
 
 def _parse_arguments(arguments: Any) -> Any:

@@ -41,9 +41,9 @@ defaults, or set them explicitly when needed.
 Free personal Cerebras accounts can have strict rate limits during development,
 so use smaller smoke scenarios first, keep completion budgets tight, and
 schedule large runs externally rather than launching many at once. The reference
-templates do not do proactive local
-request/token quota pacing before calls. They retry reactively only after a
-provider-visible Cerebras 429:
+templates proactively wait when previous successful rate-limit headers show the
+next estimated request would exceed the remaining token-minute quota. They also
+retry reactively after a provider-visible Cerebras 429:
 
 ```env
 TRACK2_CEREBRAS_QUEUE_BACKOFF_SECONDS=60

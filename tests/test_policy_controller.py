@@ -1,6 +1,9 @@
 import json
 
 from carbench_agent_core import PolicyAwareController
+from carbench_agent_core.actions import NextAction
+from carbench_agent_core.flows import ControllerState
+from carbench_agent_core.tool_index import ToolIndex
 
 
 def fake_tool(
@@ -54,6 +57,71 @@ def navigation_tools() -> list[dict]:
         fake_tool("navigation_delete_waypoint"),
         fake_tool("navigation_replace_one_waypoint"),
     ]
+
+
+class UnverifiedCompletionController(PolicyAwareController):
+    def _next_sunroof_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction:
+        return NextAction.respond("Done.", reason="sunroof_done")
+
+
+def test_controller_tracks_obligations_until_tool_completion() -> None:
+    controller = PolicyAwareController()
+    tools = [
+        fake_tool(
+            "open_close_trunk_door",
+            properties={"action": {"type": "string"}},
+            required=["action"],
+        )
+    ]
+
+    confirmation = controller.decide(
+        context_id="ctx-obligation",
+        messages=system_messages(),
+        tools=tools,
+        latest_user_text="Open the trunk.",
+    )
+    assert confirmation is not None
+    assert confirmation.reason == "trunk_confirmation"
+    assert controller.pending_obligations("ctx-obligation") == ("trunk",)
+
+    tool_call = controller.decide(
+        context_id="ctx-obligation",
+        messages=system_messages(),
+        tools=tools,
+        latest_user_text="Yes.",
+    )
+    assert tool_call is not None
+    assert tool_call.reason == "trunk_action"
+    assert controller.pending_obligations("ctx-obligation") == ("trunk",)
+
+    completion = controller.decide(
+        context_id="ctx-obligation",
+        messages=system_messages(),
+        tools=tools,
+        latest_tool_results=[tool_result("open_close_trunk_door", {"action": "OPEN"})],
+    )
+    assert completion is not None
+    assert completion.reason == "trunk_done"
+    assert controller.pending_obligations("ctx-obligation") == ()
+
+
+def test_controller_rejects_unverified_completion_claim() -> None:
+    controller = UnverifiedCompletionController()
+    state = ControllerState()
+    state.sunroof.active = True
+    controller._states["ctx-unverified"] = state
+
+    action = controller.decide(
+        context_id="ctx-unverified",
+        messages=system_messages(),
+        tools=[],
+    )
+
+    assert action is not None
+    assert action.reason == "sunroof_done_evidence_guard"
+    assert "couldn't verify" in action.content
 
 
 def test_navigation_controller_sets_fastest_single_destination_route() -> None:
