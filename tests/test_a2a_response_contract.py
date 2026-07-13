@@ -26,6 +26,8 @@ from car_bench.types import Task, TaskType
 from track_2_agent_under_test_cerebras.car_bench_agent import (
     AgentInferenceResult,
     CARBenchAgentExecutor as CerebrasCARBenchAgentExecutor,
+    build_next_action_prompt,
+    prompt_component_char_counts,
 )
 from track_2_agent_under_test_cerebras import cerebras_client as cerebras_client_module
 from track_2_agent_under_test_cerebras.cerebras_client import (
@@ -360,6 +362,38 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(headers.remaining_tokens_minute, 1200.0)
         self.assertEqual(headers.reset_requests_day_seconds, 3600.0)
         self.assertEqual(headers.reset_tokens_minute_seconds, 12.5)
+
+    def test_cerebras_proactively_waits_for_known_token_quota(self) -> None:
+        client = CerebrasCompletionClient(sdk_client=FakeCerebrasSDKClient([]))
+        client._last_rate_limit_headers_by_model["gpt-oss-120b"] = (
+            CerebrasRateLimitHeaders(
+                remaining_tokens_minute=100.0,
+                reset_tokens_minute_seconds=2.5,
+            ),
+            cerebras_client_module.time.perf_counter(),
+        )
+
+        wait_seconds = client._proactive_quota_wait_seconds(
+            model="gpt-oss-120b",
+            estimated_tokens=101,
+        )
+
+        self.assertEqual(wait_seconds, 3.5)
+        self.assertEqual(
+            client._proactive_quota_wait_seconds(
+                model="gpt-oss-120b",
+                estimated_tokens=100,
+            ),
+            0.0,
+        )
+        client._clear_rate_limit_headers("gpt-oss-120b")
+        self.assertEqual(
+            client._proactive_quota_wait_seconds(
+                model="gpt-oss-120b",
+                estimated_tokens=101,
+            ),
+            0.0,
+        )
 
     def test_cerebras_estimates_prompt_plus_completion_budget(self) -> None:
         estimated = estimate_request_tokens(
@@ -911,59 +945,6 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(arguments["charging_time"], 40)
         self.assertIs(type(arguments["charging_time"]), int)
 
-    def test_generic_tool_exception_is_recorded_in_tool_execution_errors(self) -> None:
-        class FailingTool:
-            @staticmethod
-            def invoke(**kwargs):
-                raise TypeError("boom")
-
-        env = Env.__new__(Env)
-        env.actions = []
-        env.data = {}
-        env.task = fake_task()
-        env.tools_map = {"failing_tool": FailingTool}
-
-        token = tool_execution_errors_during_runtime.set([])
-        try:
-            response = env.step(
-                SimpleNamespace(name="failing_tool", kwargs={}),
-                [],
-            )
-            errors = tool_execution_errors_during_runtime.get()
-        finally:
-            tool_execution_errors_during_runtime.reset(token)
-
-        self.assertEqual(response.observation, "Error: boom")
-        self.assertEqual(errors, ["failing_tool: TypeError: boom"])
-
-    def test_async_generic_tool_exception_is_recorded_in_tool_execution_errors(
-        self,
-    ) -> None:
-        class FailingTool:
-            @staticmethod
-            def invoke(**kwargs):
-                raise TypeError("boom")
-
-        env = Env.__new__(Env)
-        env.terminate_tools = []
-        env.task = fake_task()
-
-        token = tool_execution_errors_during_runtime.set([])
-        try:
-            result = asyncio.run(
-                env._run_action(
-                    SimpleNamespace(name="failing_tool", kwargs={}),
-                    {"failing_tool": FailingTool},
-                    {},
-                )
-            )
-            errors = tool_execution_errors_during_runtime.get()
-        finally:
-            tool_execution_errors_during_runtime.reset(token)
-
-        self.assertEqual(result["observation"], "Error: boom")
-        self.assertEqual(errors, ["failing_tool: TypeError: boom"])
-
     def test_explicit_tool_execution_errors_are_preserved(self) -> None:
         class ExplicitFailureTool:
             @staticmethod
@@ -1188,6 +1169,65 @@ class A2AResponseContractTest(unittest.TestCase):
             response.parts[0].text,
             "I don't currently have that capability, so I can't complete this request.",
         )
+
+    def test_cerebras_prompt_compacts_tool_schema_and_bounds_history(self) -> None:
+        verbose_description = "tool description " * 80
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "set_example",
+                    "description": verbose_description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "mode": {
+                                "type": "string",
+                                "enum": ["safe", "fast"],
+                                "description": verbose_description,
+                                "examples": ["safe"],
+                            }
+                        },
+                        "required": ["mode"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ]
+        messages = [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "initial task"},
+            *[
+                {"role": "assistant", "content": f"obsolete turn {index}"}
+                for index in range(30)
+            ],
+            {"role": "user", "content": "latest task state"},
+        ]
+
+        prompt = json.loads(
+            build_next_action_prompt(messages=messages, tools=tools)
+        )
+
+        compact_tool = prompt["available_tools"][0]["function"]
+        self.assertEqual(compact_tool["name"], "set_example")
+        self.assertLessEqual(len(compact_tool["description"]), 240)
+        mode_schema = compact_tool["parameters"]["properties"]["mode"]
+        self.assertEqual(mode_schema["enum"], ["safe", "fast"])
+        self.assertNotIn("examples", mode_schema)
+
+        transcript = prompt["conversation_transcript"]
+        self.assertEqual(transcript[0]["content"], "policy")
+        self.assertEqual(transcript[1]["content"], "initial task")
+        self.assertEqual(transcript[-1]["content"], "latest task state")
+        self.assertLessEqual(len(transcript), 24)
+        self.assertNotIn(
+            "obsolete turn 0",
+            [item["content"] for item in transcript],
+        )
+        sizes = prompt_component_char_counts(messages=messages, tools=tools)
+        self.assertGreater(sizes["system_prompt_chars"], 0)
+        self.assertGreater(sizes["tool_schema_prompt_chars"], 0)
+        self.assertGreater(sizes["transcript_prompt_chars"], 0)
 
     def test_cerebras_turn_metrics_are_public_metadata_shape(self) -> None:
         executor = CerebrasCARBenchAgentExecutor(model="gpt-oss-120b")

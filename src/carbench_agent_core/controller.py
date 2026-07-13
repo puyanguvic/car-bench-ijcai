@@ -12,6 +12,7 @@ import ast
 import json
 import math
 import re
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from .actions import NextAction
@@ -110,6 +111,116 @@ SAFE_SUNROOF_WEATHER = {"sunny", "cloudy", "partly_cloudy"}
 SAFE_FOG_LIGHT_WEATHER = {"cloudy_and_thunderstorm", "cloudy_and_hail"}
 
 
+@dataclass(frozen=True)
+class _FlowSpec:
+    """Declarative lifecycle and dispatch metadata for one controller flow."""
+
+    name: str
+    handler_name: str
+    factory: type[Any] | None = None
+    tracks_obligation: bool = False
+    reset_while_other_pending: bool = False
+    done_reason: str | None = None
+
+    @property
+    def completion_reason(self) -> str:
+        return self.done_reason or f"{self.name}_done"
+
+
+# Order is part of the controller contract: when multiple flows are active, the
+# first one owns the next action exactly as it did in the original branch chain.
+_FLOW_SPECS = (
+    _FlowSpec("sunroof", "_next_sunroof_action", SunroofFlow, True),
+    _FlowSpec("sunshade", "_next_sunshade_action", SunshadeFlow, True),
+    _FlowSpec("window_match", "_next_window_match_action", WindowMatchFlow, True),
+    _FlowSpec("window", "_next_window_action", WindowFlow, True, True),
+    _FlowSpec("ambient_light", "_next_ambient_light_action", AmbientLightFlow, True),
+    _FlowSpec("trunk", "_next_trunk_action", TrunkFlow, True),
+    _FlowSpec(
+        "air_conditioning",
+        "_next_air_conditioning_action",
+        AirConditioningFlow,
+        True,
+        True,
+    ),
+    _FlowSpec(
+        "air_circulation",
+        "_next_air_circulation_action",
+        AirCirculationFlow,
+        True,
+        True,
+    ),
+    _FlowSpec("air_quality", "_next_air_quality_action"),
+    _FlowSpec("fan_speed", "_next_fan_speed_action", FanSpeedFlow, True, True),
+    _FlowSpec(
+        "cabin_temperature",
+        "_next_cabin_temperature_action",
+        CabinTemperatureFlow,
+        True,
+        True,
+    ),
+    _FlowSpec(
+        "steering_wheel_heating",
+        "_next_steering_wheel_heating_action",
+        SteeringWheelHeatingFlow,
+        True,
+        True,
+    ),
+    _FlowSpec(
+        "climate_energy_inspection",
+        "_next_climate_energy_inspection_action",
+        ClimateEnergyInspectionFlow,
+        True,
+        True,
+    ),
+    _FlowSpec(
+        "climate_inspection",
+        "_next_climate_inspection_action",
+        ClimateInspectionFlow,
+        True,
+        True,
+    ),
+    _FlowSpec(
+        "occupancy_comfort",
+        "_next_occupancy_comfort_action",
+        OccupancyComfortFlow,
+        True,
+        True,
+    ),
+    _FlowSpec(
+        "driver_comfort_temperature",
+        "_next_driver_comfort_temperature_action",
+        DriverComfortTemperatureFlow,
+        True,
+        True,
+        "driver_comfort_done",
+    ),
+    _FlowSpec(
+        "passenger_comfort_match",
+        "_next_passenger_comfort_match_action",
+        PassengerComfortMatchFlow,
+        True,
+        True,
+    ),
+    _FlowSpec("reading_light_occupancy", "_next_reading_light_occupancy_action"),
+    _FlowSpec("reading_light", "_next_reading_light_action"),
+    _FlowSpec("defrost", "_next_defrost_action", DefrostFlow, True),
+    _FlowSpec("route_energy", "_next_route_energy_action", RouteEnergyFlow, True, True),
+    _FlowSpec("poi", "_next_poi_action", POIFlow, True, True),
+    _FlowSpec(
+        "multi_stop_navigation",
+        "_next_multi_stop_navigation_action",
+        MultiStopNavigationFlow,
+        True,
+        True,
+    ),
+    _FlowSpec("navigation", "_next_navigation_action", tracks_obligation=True),
+    _FlowSpec("email", "_next_email_action", tracks_obligation=True),
+    _FlowSpec("high_beam", "_next_high_beam_action"),
+    _FlowSpec("fog_lights", "_next_fog_lights_action"),
+)
+
+
 class PolicyAwareController:
     """Deterministic guard layer for high-value CAR-bench policies."""
 
@@ -118,6 +229,20 @@ class PolicyAwareController:
 
     def reset(self, context_id: str) -> None:
         self._states.pop(context_id, None)
+
+    def pending_obligations(self, context_id: str) -> tuple[str, ...]:
+        """Return unfinished deterministic flows for diagnostics and auditing."""
+
+        state = self._states.get(context_id)
+        if state is None:
+            return ()
+        return tuple(
+            spec.name
+            for spec in _FLOW_SPECS
+            if spec.tracks_obligation
+            and getattr(state, spec.name).active
+            and not getattr(state, spec.name).completed
+        )
 
     def decide(
         self,
@@ -152,60 +277,8 @@ class PolicyAwareController:
             state.pending_direct_response = None
         elif state.pending_set_navigation_route_ids:
             action = self._next_pending_navigation_setup_action(state, tool_index)
-        elif state.sunroof.active:
-            action = self._next_sunroof_action(state, tool_index)
-        elif state.sunshade.active:
-            action = self._next_sunshade_action(state, tool_index)
-        elif state.window_match.active:
-            action = self._next_window_match_action(state, tool_index)
-        elif state.window.active:
-            action = self._next_window_action(state, tool_index)
-        elif state.ambient_light.active:
-            action = self._next_ambient_light_action(state, tool_index)
-        elif state.trunk.active:
-            action = self._next_trunk_action(state, tool_index)
-        elif state.air_conditioning.active:
-            action = self._next_air_conditioning_action(state, tool_index)
-        elif state.air_circulation.active:
-            action = self._next_air_circulation_action(state, tool_index)
-        elif state.air_quality.active:
-            action = self._next_air_quality_action(state, tool_index)
-        elif state.fan_speed.active:
-            action = self._next_fan_speed_action(state, tool_index)
-        elif state.cabin_temperature.active:
-            action = self._next_cabin_temperature_action(state, tool_index)
-        elif state.steering_wheel_heating.active:
-            action = self._next_steering_wheel_heating_action(state, tool_index)
-        elif state.climate_energy_inspection.active:
-            action = self._next_climate_energy_inspection_action(state, tool_index)
-        elif state.climate_inspection.active:
-            action = self._next_climate_inspection_action(state, tool_index)
-        elif state.occupancy_comfort.active:
-            action = self._next_occupancy_comfort_action(state, tool_index)
-        elif state.driver_comfort_temperature.active:
-            action = self._next_driver_comfort_temperature_action(state, tool_index)
-        elif state.passenger_comfort_match.active:
-            action = self._next_passenger_comfort_match_action(state, tool_index)
-        elif state.reading_light_occupancy.active:
-            action = self._next_reading_light_occupancy_action(state, tool_index)
-        elif state.reading_light.active:
-            action = self._next_reading_light_action(state, tool_index)
-        elif state.defrost.active:
-            action = self._next_defrost_action(state, tool_index)
-        elif state.route_energy.active:
-            action = self._next_route_energy_action(state, tool_index)
-        elif state.poi.active:
-            action = self._next_poi_action(state, tool_index)
-        elif state.multi_stop_navigation.active:
-            action = self._next_multi_stop_navigation_action(state, tool_index)
-        elif state.navigation.active:
-            action = self._next_navigation_action(state, tool_index)
-        elif state.email.active:
-            action = self._next_email_action(state, tool_index)
-        elif state.high_beam.active:
-            action = self._next_high_beam_action(state, tool_index)
-        elif state.fog_lights.active:
-            action = self._next_fog_lights_action(state, tool_index)
+        else:
+            action = self._next_active_flow_action(state, tool_index)
 
         if (
             action is None
@@ -221,6 +294,48 @@ class PolicyAwareController:
         if action is not None:
             return self._validated_controller_action(action, tool_index)
 
+        return None
+
+    def _next_active_flow_action(
+        self, state: ControllerState, tool_index: ToolIndex
+    ) -> NextAction | None:
+        flow_states = tuple(
+            (spec, getattr(state, spec.name)) for spec in _FLOW_SPECS
+        )
+        for spec, flow in flow_states:
+            if not flow.active:
+                continue
+
+            handler = getattr(self, spec.handler_name)
+            action = handler(state, tool_index)
+            if (
+                action is not None
+                and action.action == "respond"
+                and action.reason.endswith("_done")
+            ):
+                completion = next(
+                    (
+                        (completion_spec, completion_flow)
+                        for completion_spec, completion_flow in flow_states
+                        if completion_spec.completion_reason == action.reason
+                    ),
+                    None,
+                )
+                completion_verified = completion is not None and (
+                    completion[1].completed
+                    or getattr(state, completion[0].name).completed
+                )
+            else:
+                completion_verified = True
+
+            if not completion_verified:
+                assert action is not None
+                return NextAction.respond(
+                    "I couldn't verify that the requested action completed, "
+                    "so I won't report it as done.",
+                    reason=f"{action.reason}_evidence_guard",
+                )
+            return action
         return None
 
     def _validated_controller_action(
@@ -266,110 +381,29 @@ class PolicyAwareController:
         return action
 
     def _clear_completed_flows_with_pending_work(self, state: ControllerState) -> None:
-        pending = [
-            state.sunroof.active and not state.sunroof.completed,
-            state.sunshade.active and not state.sunshade.completed,
-            state.window_match.active and not state.window_match.completed,
-            state.window.active and not state.window.completed,
-            state.ambient_light.active and not state.ambient_light.completed,
-            state.trunk.active and not state.trunk.completed,
-            state.air_conditioning.active and not state.air_conditioning.completed,
-            state.air_circulation.active and not state.air_circulation.completed,
-            state.fan_speed.active and not state.fan_speed.completed,
-            state.cabin_temperature.active and not state.cabin_temperature.completed,
-            state.steering_wheel_heating.active
-            and not state.steering_wheel_heating.completed,
-            state.climate_energy_inspection.active
-            and not state.climate_energy_inspection.completed,
-            state.climate_inspection.active
-            and not state.climate_inspection.completed,
-            state.occupancy_comfort.active
-            and not state.occupancy_comfort.completed,
-            state.driver_comfort_temperature.active
-            and not state.driver_comfort_temperature.completed,
-            state.passenger_comfort_match.active
-            and not state.passenger_comfort_match.completed,
-            state.defrost.active and not state.defrost.completed,
-            state.poi.active and not state.poi.completed,
-            state.route_energy.active and not state.route_energy.completed,
-            state.multi_stop_navigation.active
-            and not state.multi_stop_navigation.completed,
-            state.navigation.active and not state.navigation.completed,
-            state.email.active and not state.email.completed,
-        ]
-        if not any(pending):
+        if not any(
+            getattr(state, spec.name).active
+            and not getattr(state, spec.name).completed
+            for spec in _FLOW_SPECS
+            if spec.tracks_obligation
+        ):
             return
-
-        if state.window.completed:
-            state.window = WindowFlow()
-        if state.air_circulation.completed:
-            state.air_circulation = AirCirculationFlow()
-        if state.air_conditioning.completed:
-            state.air_conditioning = AirConditioningFlow()
-        if state.fan_speed.completed:
-            state.fan_speed = FanSpeedFlow()
-        if state.cabin_temperature.completed:
-            state.cabin_temperature = CabinTemperatureFlow()
-        if state.steering_wheel_heating.completed:
-            state.steering_wheel_heating = SteeringWheelHeatingFlow()
-        if state.climate_energy_inspection.completed:
-            state.climate_energy_inspection = ClimateEnergyInspectionFlow()
-        if state.climate_inspection.completed:
-            state.climate_inspection = ClimateInspectionFlow()
-        if state.occupancy_comfort.completed:
-            state.occupancy_comfort = OccupancyComfortFlow()
-        if state.driver_comfort_temperature.completed:
-            state.driver_comfort_temperature = DriverComfortTemperatureFlow()
-        if state.passenger_comfort_match.completed:
-            state.passenger_comfort_match = PassengerComfortMatchFlow()
-        if state.poi.completed:
-            state.poi = POIFlow()
-        if state.route_energy.completed:
-            state.route_energy = RouteEnergyFlow()
-        if state.multi_stop_navigation.completed:
-            state.multi_stop_navigation = MultiStopNavigationFlow()
+        self._reset_completed_flows(state, while_other_pending=True)
 
     def _reset_completed_flows_for_new_intent(self, state: ControllerState) -> None:
-        if state.sunroof.completed:
-            state.sunroof = SunroofFlow()
-        if state.sunshade.completed:
-            state.sunshade = SunshadeFlow()
-        if state.window_match.completed:
-            state.window_match = WindowMatchFlow()
-        if state.window.completed:
-            state.window = WindowFlow()
-        if state.ambient_light.completed:
-            state.ambient_light = AmbientLightFlow()
-        if state.trunk.completed:
-            state.trunk = TrunkFlow()
-        if state.air_circulation.completed:
-            state.air_circulation = AirCirculationFlow()
-        if state.air_conditioning.completed:
-            state.air_conditioning = AirConditioningFlow()
-        if state.fan_speed.completed:
-            state.fan_speed = FanSpeedFlow()
-        if state.cabin_temperature.completed:
-            state.cabin_temperature = CabinTemperatureFlow()
-        if state.steering_wheel_heating.completed:
-            state.steering_wheel_heating = SteeringWheelHeatingFlow()
-        if state.climate_energy_inspection.completed:
-            state.climate_energy_inspection = ClimateEnergyInspectionFlow()
-        if state.climate_inspection.completed:
-            state.climate_inspection = ClimateInspectionFlow()
-        if state.occupancy_comfort.completed:
-            state.occupancy_comfort = OccupancyComfortFlow()
-        if state.driver_comfort_temperature.completed:
-            state.driver_comfort_temperature = DriverComfortTemperatureFlow()
-        if state.passenger_comfort_match.completed:
-            state.passenger_comfort_match = PassengerComfortMatchFlow()
-        if state.defrost.completed:
-            state.defrost = DefrostFlow()
-        if state.poi.completed:
-            state.poi = POIFlow()
-        if state.route_energy.completed:
-            state.route_energy = RouteEnergyFlow()
-        if state.multi_stop_navigation.completed:
-            state.multi_stop_navigation = MultiStopNavigationFlow()
+        self._reset_completed_flows(state)
+
+    @staticmethod
+    def _reset_completed_flows(
+        state: ControllerState, *, while_other_pending: bool = False
+    ) -> None:
+        for spec in _FLOW_SPECS:
+            if spec.factory is None:
+                continue
+            if while_other_pending and not spec.reset_while_other_pending:
+                continue
+            if getattr(state, spec.name).completed:
+                setattr(state, spec.name, spec.factory())
 
     def _sync_runtime_context(
         self, state: ControllerState, messages: list[dict[str, Any]]

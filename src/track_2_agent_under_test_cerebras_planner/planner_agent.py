@@ -14,6 +14,7 @@ from track_2_agent_under_test_cerebras.car_bench_agent import (
     NEXT_ACTION_OUTPUT_SCHEMA,
     CARBenchAgentExecutor as CerebrasNextActionExecutor,
     build_next_action_prompt,
+    compact_tools_for_prompt,
     logger as cerebras_agent_logger,
     parse_next_action,
 )
@@ -415,14 +416,15 @@ def build_planner_prompt(
     tools: list[dict[str, Any]],
     correction: str | None = None,
 ) -> str:
-    planning_tool = _find_tool(tools, "planning_tool")
+    prompt_tools = compact_tools_for_prompt(tools)
+    planning_tool = _find_tool(prompt_tools, "planning_tool")
     prompt = {
         "task": (
             "Create a private plan for the current user request. The executor "
             "will reuse this plan across subsequent tool-result turns until it "
             "can respond to the user."
         ),
-        "available_tools": tools,
+        "available_tools": prompt_tools,
         "planning_tool_schema": planning_tool,
         "conversation_transcript": _messages_for_private_prompt(messages),
         "rules": [

@@ -154,6 +154,7 @@ Then add the evaluator and Cerebras keys to `.env`:
 ```bash
 GEMINI_API_KEY=...
 CEREBRAS_API_KEY=...
+TRACK2_CEREBRAS_API_BASE=https://api.cerebras.ai
 TRACK2_EXECUTOR_MODEL=gpt-oss-120b
 TRACK2_EXECUTOR_REASONING_EFFORT=medium
 ```
@@ -172,9 +173,11 @@ provider should receive an explicit temperature value.
 
 Public Cerebras development-tier limits can be strict. Use smoke scenarios
 first and keep `TRACK2_MAX_COMPLETION_TOKENS` tight. The reference templates
-retry reactively only after a Cerebras 429, using
-`x-ratelimit-reset-tokens-minute` when Cerebras provides it and falling back to
-`retry-after` otherwise. Provider queue pressure uses jittered local backoff.
+proactively wait when previous successful rate-limit headers show that the next
+estimated request would exceed the token-minute quota. They still retry
+reactively after a Cerebras 429, using `x-ratelimit-reset-tokens-minute` when
+Cerebras provides it and falling back to `retry-after` otherwise. Provider
+queue pressure uses jittered local backoff.
 Cerebras 429s write JSON reports to
 `/tmp/car-bench-rate-limit-reports` by default. Expect organizers to provide
 increased Cerebras rate limits compared with a free personal account; access

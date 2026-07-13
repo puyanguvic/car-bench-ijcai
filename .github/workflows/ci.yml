@@ -1,0 +1,27 @@
+name: Release checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Fetch pinned CAR-bench dependency
+        run: ./scripts/setup_car_bench.sh
+      - name: Install release dependencies
+        run: uv sync --frozen --extra track-2-agent --extra car-bench-evaluator
+      - name: Lint
+        run: uv run ruff check src tests scripts generate_compose.py
+      - name: Test
+        run: uv run pytest -q

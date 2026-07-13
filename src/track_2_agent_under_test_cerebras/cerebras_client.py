@@ -1,4 +1,4 @@
-"""Cerebras SDK client and reactive rate-limit handling for Track 2 agents."""
+"""Cerebras SDK client with proactive pacing and reactive rate-limit handling."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ DEFAULT_CEREBRAS_QUEUE_BACKOFF_SECOND_MAX_SECONDS = 120.0
 DEFAULT_CEREBRAS_QUEUE_BACKOFF_CAP_MIN_SECONDS = 180.0
 DEFAULT_CEREBRAS_QUEUE_BACKOFF_CAP_MAX_SECONDS = 300.0
 DEFAULT_CEREBRAS_RATE_LIMIT_RETRY_BUFFER_SECONDS = 1.0
+DEFAULT_CEREBRAS_TOKEN_QUOTA_WINDOW_SECONDS = 60.0
 CEREBRAS_RATE_LIMIT_HEADER_NAMES = (
     "x-ratelimit-limit-requests-day",
     "x-ratelimit-limit-tokens-minute",
@@ -269,6 +270,14 @@ class CerebrasCompletionClient:
             "TRACK2_CEREBRAS_RATE_LIMIT_RETRY_BUFFER_SECONDS",
             DEFAULT_CEREBRAS_RATE_LIMIT_RETRY_BUFFER_SECONDS,
         )
+        self.proactive_token_pacing = _env_bool(
+            "TRACK2_CEREBRAS_PROACTIVE_TOKEN_PACING",
+            default=True,
+        )
+        self.token_quota_window_seconds = _env_float(
+            "TRACK2_CEREBRAS_TOKEN_QUOTA_WINDOW_SECONDS",
+            DEFAULT_CEREBRAS_TOKEN_QUOTA_WINDOW_SECONDS,
+        )
         self.rate_limit_report_dir = Path(
             os.getenv(
                 "CAR_BENCH_CEREBRAS_RATE_LIMIT_REPORT_DIR",
@@ -347,6 +356,22 @@ class CerebrasCompletionClient:
                 messages=messages,
                 max_completion_tokens=max_completion_tokens,
             )
+            proactive_wait_seconds = self._proactive_quota_wait_seconds(
+                model=normalized_model,
+                estimated_tokens=estimated_tokens,
+            )
+            if proactive_wait_seconds > 0:
+                quota_wait_ms += proactive_wait_seconds * 1000.0
+                if self.logger:
+                    self.logger.info(
+                        "Waiting for Cerebras token quota before request",
+                        model=normalized_model,
+                        estimated_request_tokens=estimated_tokens,
+                        wait_seconds=round(proactive_wait_seconds, 3),
+                        wait_source="previous_successful_rate_limit_headers",
+                    )
+                time.sleep(proactive_wait_seconds)
+                self._clear_rate_limit_headers(normalized_model)
             previous_request_state = self._record_attempt(
                 model=normalized_model,
                 estimated_tokens=estimated_tokens,
@@ -465,6 +490,7 @@ class CerebrasCompletionClient:
                             report_path=str(report_path) if report_path else None,
                         )
                     time.sleep(wait_seconds)
+                    self._clear_rate_limit_headers(normalized_model)
                     continue
                 raise CerebrasTemplateError(
                     f"Cerebras completion failed for {normalized_model}: {exc}"
@@ -649,6 +675,37 @@ class CerebrasCompletionClient:
                 else None
             ),
         }
+
+    def _proactive_quota_wait_seconds(
+        self,
+        *,
+        model: str,
+        estimated_tokens: int,
+    ) -> float:
+        """Avoid a known token-quota rejection when the last response exposes it."""
+
+        if not self.proactive_token_pacing:
+            return 0.0
+        with self._metrics_lock:
+            snapshot = self._last_rate_limit_headers_by_model.get(model)
+        if snapshot is None:
+            return 0.0
+
+        headers, observed_at = snapshot
+        remaining = headers.remaining_tokens_minute
+        if remaining is None or estimated_tokens <= remaining:
+            return 0.0
+
+        if headers.reset_tokens_minute_seconds is not None:
+            reset_seconds = headers.reset_tokens_minute_seconds
+        else:
+            elapsed = max(0.0, time.perf_counter() - observed_at)
+            reset_seconds = max(0.0, self.token_quota_window_seconds - elapsed)
+        return max(0.0, reset_seconds + self.rate_limit_retry_buffer_seconds)
+
+    def _clear_rate_limit_headers(self, model: str) -> None:
+        with self._metrics_lock:
+            self._last_rate_limit_headers_by_model.pop(model, None)
 
     def _record_successful_call(
         self,
@@ -1426,6 +1483,13 @@ def _env_float(name: str, default: float | None = None) -> float | None:
     if value is None or value.strip() == "":
         return default
     return float(value)
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _json_safe(value: Any) -> Any:

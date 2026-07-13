@@ -39,10 +39,12 @@ Important environment variables:
 | --- | --- | --- |
 | `CEREBRAS_API_KEY` | required | Cerebras API key used by the SDK. |
 | `TRACK2_EXECUTOR_MODEL` | `gpt-oss-120b` | Cerebras-hosted `gpt-oss` executor model. Old `cerebras/...` prefixes are accepted and stripped for compatibility. |
+| `TRACK2_CEREBRAS_API_BASE` | `https://api.cerebras.ai` | Cerebras API base. Keep the official endpoint for final Track 2 evaluation unless organizers instruct otherwise. |
 | `TRACK2_EXECUTOR_REASONING_EFFORT` | `medium` | Cerebras `gpt-oss` reasoning effort for executor calls. Supported values are `low`, `medium`, and `high`. |
 | `TRACK2_CEREBRAS_SERVICE_TIER` | unset | Optional Cerebras service tier, for example `default`, `priority`, `auto`, or `flex`. |
 | `TRACK2_MAX_COMPLETION_TOKENS` | `1024` | Completion-token cap for executor calls. |
 | `TRACK2_TEMPERATURE` | unset | Optional executor temperature. Leave unset to use the provider default. |
+| `TRACK2_PROMPT_HISTORY_MAX_MESSAGES` | `24` | Maximum transcript messages retained for a model call; the system policy and initial user request are always preserved. |
 | `TRACK2_CEREBRAS_QUEUE_BACKOFF_SECONDS` | `60` | Nominal first local pause after a provider `queue_exceeded` 429. |
 | `TRACK2_CEREBRAS_QUEUE_BACKOFF_INITIAL_JITTER_RATIO` | `0.1` | First queue retry jitter ratio; default gives roughly 54-66 seconds. |
 | `TRACK2_CEREBRAS_QUEUE_BACKOFF_SECOND_MIN_SECONDS` | `90` | Minimum second queue retry wait. |
@@ -50,8 +52,10 @@ Important environment variables:
 | `TRACK2_CEREBRAS_QUEUE_BACKOFF_CAP_MIN_SECONDS` | `180` | Minimum third-and-later queue retry wait. |
 | `TRACK2_CEREBRAS_QUEUE_BACKOFF_CAP_MAX_SECONDS` | `300` | Maximum third-and-later queue retry wait. |
 | `TRACK2_CEREBRAS_RATE_LIMIT_RETRY_BUFFER_SECONDS` | `1` | Safety buffer added to provider reset or retry headers before retrying a 429. |
+| `TRACK2_CEREBRAS_PROACTIVE_TOKEN_PACING` | `true` | Wait before a request when the previous successful response proves the estimated request exceeds the remaining token-minute quota. |
+| `TRACK2_CEREBRAS_TOKEN_QUOTA_WINDOW_SECONDS` | `60` | Fallback token-minute window when Cerebras omits its reset header. |
 | `CAR_BENCH_CEREBRAS_RATE_LIMIT_REPORT_DIR` | `/tmp/car-bench-rate-limit-reports` | Directory for Cerebras rate-limit JSON reports. Falls back to `CAR_BENCH_RATE_LIMIT_REPORT_DIR` when set. |
-| `TRACK2_LLM_MALFORMED_RETRIES` | `1` | Retry budget for malformed next-action JSON. |
+| `TRACK2_LLM_MALFORMED_RETRIES` | `1` | Retry budget for malformed next-action JSON (0–4; the cap preserves the Track 2 five-sequential-call limit). |
 
 ## Rate Limits And Development Windows
 
@@ -60,11 +64,11 @@ tier, where rate limits can be strict. Use smaller smoke scenarios first, keep
 `TRACK2_MAX_COMPLETION_TOKENS` as low as the task allows, and schedule larger
 public-tier runs externally instead of launching many jobs at once.
 
-The reference client does not proactively throttle based on local request/token
-limits or previous successful responses. It sends the request and only waits
-reactively after a provider-visible Cerebras 429.
-The reference client records successful provider-call timings and keeps failed
-429 attempts in logs/reports.
+The client reads the previous successful response's rate-limit headers. If the
+next estimated request would exceed the exposed remaining token-minute quota,
+it waits for the reset window before sending rather than knowingly provoking a
+429. It still handles provider-visible 429s reactively and records them in
+logs/reports.
 
 When a Cerebras 429 is observed, the client writes a JSON report by default to
 `/tmp/car-bench-rate-limit-reports`. The report includes session start time,

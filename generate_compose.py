@@ -210,7 +210,7 @@ def format_depends_on(services: list[str]) -> str:
     lines = []
     for service in services:
         lines.append(f"      {service}:")
-        lines.append(f"        condition: service_healthy")
+        lines.append("        condition: service_healthy")
     return "\n" + "\n".join(lines)
 
 
@@ -401,8 +401,8 @@ def main():
             print(f"✓ Generated {ENV_PATH}")
 
     print(f"✓ Generated {compose_path} and {a2a_scenario_path}")
-    print(f"\nNext steps:")
-    print(f"  1. Review/edit .env file with your API keys")
+    print("\nNext steps:")
+    print("  1. Review/edit .env file with your API keys")
     print(f"  2. {compose_up_command(compose_path)}")
     print(f"  3. Check {args.results_dir}/{_agent_name(scenario)}/ for timestamped results")
 

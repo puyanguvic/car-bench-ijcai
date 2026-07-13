@@ -96,6 +96,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--card-url", type=str)
     parser.add_argument("--executor-model", type=str, default=None)
+    parser.add_argument("--api-base", type=str, default=None)
     parser.add_argument("--service-tier", type=str, default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--reasoning-effort", type=str, default=None)
@@ -111,6 +112,11 @@ def main() -> None:
         args.executor_model
         if args.executor_model is not None
         else _env_or_default("TRACK2_EXECUTOR_MODEL", DEFAULT_EXECUTOR_MODEL)
+    )
+    api_base = (
+        args.api_base
+        if args.api_base is not None
+        else _env_or_default("TRACK2_CEREBRAS_API_BASE", DEFAULT_CEREBRAS_API_BASE)
     )
     service_tier = (
         args.service_tier
@@ -144,10 +150,16 @@ def main() -> None:
         if args.malformed_retries is not None
         else _env_int("TRACK2_LLM_MALFORMED_RETRIES", 1)
     )
+    if not 0 <= malformed_retries <= 4:
+        parser.error(
+            "--malformed-retries / TRACK2_LLM_MALFORMED_RETRIES must be between "
+            "0 and 4 so a baseline step never exceeds five sequential LLM calls."
+        )
 
     logger.info(
         "Starting CAR-bench agent (Cerebras)",
         executor_model=executor_model,
+        api_base=api_base,
         service_tier=service_tier,
         temperature=temperature,
         reasoning_effort=reasoning_effort,
@@ -162,7 +174,7 @@ def main() -> None:
     request_handler = DefaultRequestHandler(
         agent_executor=CARBenchAgentExecutor(
             model=executor_model or DEFAULT_EXECUTOR_MODEL,
-            api_base=DEFAULT_CEREBRAS_API_BASE,
+            api_base=api_base,
             service_tier=service_tier,
             temperature=temperature,
             reasoning_effort=reasoning_effort,
