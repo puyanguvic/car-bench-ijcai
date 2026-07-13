@@ -13,7 +13,10 @@ RUN \
 
 FROM python:3.12-slim-trixie@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 
-RUN adduser --disabled-password --gecos "" carbench
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && adduser --disabled-password --gecos "" carbench
 USER carbench
 WORKDIR /home/carbench/app
 
