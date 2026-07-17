@@ -69,6 +69,10 @@ jobs:
           context: .
           file: ${{ steps.config.outputs.dockerfile }}
           platforms: linux/amd64
+          # Keep the submitted reference a single-platform image manifest.
+          # A default provenance attachment adds an unknown/unknown descriptor
+          # to the OCI index, which can confuse strict platform validators.
+          provenance: false
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
