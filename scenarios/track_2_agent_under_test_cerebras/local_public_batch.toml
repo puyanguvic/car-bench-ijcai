@@ -1,4 +1,4 @@
-# Local public batch scenario for the Track 2 Cerebras agent under test.
+# Local public batch scenario for the PACT Track 2 agent under test.
 # Runs a medium-sized public test subset for failure analysis.
 
 [evaluator]

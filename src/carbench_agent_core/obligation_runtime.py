@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Callable, Literal, TypeAlias
@@ -10,11 +12,13 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from .evidence_ledger import (
+    ActionAuthorization,
     ConfirmationEvent,
     EventDisposition,
     EvidenceLedger,
     EvidenceRecord,
     EvidenceSource,
+    EvidenceStatus,
     ExternalResultEvent,
     ExternalResultStatus,
     InputEvent,
@@ -28,6 +32,7 @@ from .plan_ir import (
     PlanIR,
     PlanNode,
     RespondNode,
+    ResponseOutcome,
 )
 
 
@@ -51,8 +56,11 @@ class ExternalCallAction(BaseModel):
     kind: Literal["observe", "act"]
     node_id: str = Field(min_length=1)
     call_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
     operation: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+    argument_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    capability_digest: str | None = None
 
 
 class AskAction(BaseModel):
@@ -61,6 +69,7 @@ class AskAction(BaseModel):
     kind: Literal["ask"] = "ask"
     node_id: str = Field(min_length=1)
     call_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
 
 
@@ -70,6 +79,7 @@ class ConfirmAction(BaseModel):
     kind: Literal["confirm"] = "confirm"
     node_id: str = Field(min_length=1)
     call_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
 
 
@@ -78,14 +88,23 @@ class RespondAction(BaseModel):
 
     kind: Literal["respond"] = "respond"
     node_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
     text: str = Field(min_length=1)
-    completion: bool
+    outcome: ResponseOutcome
     evidence_refs: tuple[str, ...] = ()
 
 
 RuntimeAction: TypeAlias = (
     ExternalCallAction | AskAction | ConfirmAction | RespondAction
 )
+EmissionGuard: TypeAlias = Callable[
+    [Literal["observe", "act"], str, dict[str, Any]],
+    None,
+]
+
+
+class EmissionRejectedError(RuntimeError):
+    """The live capability contract rejected an operation at emission time."""
 
 
 @dataclass(frozen=True)
@@ -96,6 +115,8 @@ class PendingAction:
     call_id: str
     kind: Literal["observe", "ask", "confirm", "act"]
     operation: str | None = None
+    argument_digest: str | None = None
+    capability_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +137,8 @@ class ObligationRuntime:
     """Execute one immutable plan with exactly-once event semantics."""
 
     plan: PlanIR
+    context_id: str | None = None
+    capability_digest: str | None = None
     call_id_factory: CallIdFactory = field(
         default=lambda: f"call_{uuid4().hex}", repr=False
     )
@@ -123,8 +146,14 @@ class ObligationRuntime:
     _node_status: dict[str, NodeExecutionStatus] = field(init=False, repr=False)
     _pending: PendingAction | None = field(default=None, init=False, repr=False)
     _issued_call_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _plan_digest: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        # Pydantic's frozen models are not recursively immutable.  Isolate the
+        # plan from caller-owned dicts, then retain a digest so any later
+        # mutation through ``runtime.plan`` is detected before emission.
+        self.plan = PlanIR.model_validate_json(self.plan.model_dump_json())
+        self._plan_digest = _json_digest(self.plan.model_dump(mode="json"))
         self._node_status = {
             node.id: NodeExecutionStatus.PENDING for node in self.plan.nodes
         }
@@ -147,8 +176,15 @@ class ObligationRuntime:
     def node_status(self, node_id: str) -> NodeExecutionStatus:
         return self._node_status[node_id]
 
-    def step(self) -> RuntimeAction | None:
+    def step(
+        self,
+        *,
+        emission_guard: EmissionGuard | None = None,
+    ) -> RuntimeAction | None:
         """Emit the next ready action once, or return ``None`` while not runnable."""
+
+        if _json_digest(self.plan.model_dump(mode="json")) != self._plan_digest:
+            raise EmissionRejectedError("the verified plan changed before emission")
 
         if self.status in {
             PlanRunStatus.WAITING,
@@ -163,7 +199,7 @@ class ObligationRuntime:
             node = self.plan.node_by_id[node_id]
             if not self._dependencies_satisfied(node):
                 continue
-            return self._emit(node)
+            return self._emit(node, emission_guard=emission_guard)
         return None
 
     def apply_event(self, event: RuntimeEvent) -> EventApplication:
@@ -200,7 +236,13 @@ class ObligationRuntime:
             )
 
         node = self.plan.node_by_id[pending.node_id]
-        if not _event_matches_node(event, node):
+        if not _event_matches_pending(
+            event,
+            node,
+            pending,
+            self.plan.plan_id,
+            self.context_id,
+        ):
             # The event is consumed as out of order, but the legitimate pending
             # action remains available for a correctly typed event.
             self._replace_event_disposition(event, EventDisposition.OUT_OF_ORDER)
@@ -212,7 +254,30 @@ class ObligationRuntime:
             )
 
         if isinstance(event, ExternalResultEvent):
+            if not isinstance(node, (ObserveNode, ActNode)):
+                raise TypeError("external results require an external-call node")
             if event.status == ExternalResultStatus.FAILURE:
+                evidence_key = _evidence_key(node)
+                if evidence_key is None:
+                    raise RuntimeError("external node has no evidence key")
+                self.ledger.add(
+                    EvidenceRecord(
+                        key=f"{evidence_key}.failure",
+                        value={"payload": event.payload, "error": event.error},
+                        source=EvidenceSource.EXTERNAL,
+                        status=EvidenceStatus.FAILURE,
+                        event_id=event.event_id,
+                        call_id=event.call_id,
+                        node_id=pending.node_id,
+                        producer_kind=node.kind,
+                        operation=pending.operation,
+                        external_call_id=event.external_call_id,
+                        context_id=event.context_id,
+                        plan_id=event.plan_id,
+                        argument_digest=event.argument_digest,
+                        schema_digest=event.schema_digest,
+                    )
+                )
                 self._node_status[pending.node_id] = NodeExecutionStatus.FAILED
                 self._pending = None
                 self._replace_event_disposition(event, EventDisposition.FAILURE)
@@ -229,35 +294,65 @@ class ObligationRuntime:
                     key=evidence_key,
                     value=event.payload,
                     source=EvidenceSource.EXTERNAL,
+                    status=EvidenceStatus.SUCCESS,
                     event_id=event.event_id,
                     call_id=event.call_id,
                     node_id=pending.node_id,
+                    producer_kind=node.kind,
                     operation=pending.operation,
+                    external_call_id=event.external_call_id,
+                    context_id=event.context_id,
+                    plan_id=event.plan_id,
+                    argument_digest=event.argument_digest,
+                    schema_digest=event.schema_digest,
                 )
             )
         elif isinstance(event, InputEvent):
-            assert isinstance(node, AskNode)
+            if not isinstance(node, AskNode):
+                raise TypeError("input events require an ask node")
             self.ledger.add(
                 EvidenceRecord(
                     key=node.evidence_key,
                     value=event.value,
                     source=EvidenceSource.INPUT,
+                    status=EvidenceStatus.OBSERVED,
                     event_id=event.event_id,
                     call_id=event.call_id,
                     node_id=pending.node_id,
+                    producer_kind=node.kind,
                 )
             )
         else:
-            assert isinstance(event, ConfirmationEvent)
-            assert isinstance(node, ConfirmNode)
+            if not isinstance(event, ConfirmationEvent):  # pragma: no cover
+                raise TypeError("unsupported runtime event type")
+            if not isinstance(node, ConfirmNode):
+                raise TypeError("confirmation events require a confirm node")
             self.ledger.add(
                 EvidenceRecord(
                     key=node.evidence_key,
                     value=event.confirmed,
                     source=EvidenceSource.INPUT,
+                    status=(
+                        EvidenceStatus.OBSERVED
+                        if event.confirmed
+                        else EvidenceStatus.FAILURE
+                    ),
                     event_id=event.event_id,
                     call_id=event.call_id,
                     node_id=pending.node_id,
+                    producer_kind=node.kind,
+                    context_id=self.context_id,
+                    plan_id=self.plan.plan_id,
+                    schema_digest=self.capability_digest,
+                    authorizations=tuple(
+                        ActionAuthorization(
+                            operation=authorized.operation,
+                            argument_digest=_json_digest(authorized.arguments),
+                        )
+                        for target_id in node.authorizes
+                        for authorized in (self.plan.node_by_id[target_id],)
+                        if isinstance(authorized, ActNode)
+                    ),
                 )
             )
             if not event.confirmed:
@@ -286,25 +381,63 @@ class ObligationRuntime:
             for dependency in node.depends_on
         )
 
-    def _emit(self, node: PlanNode) -> RuntimeAction:
+    def _emit(
+        self,
+        node: PlanNode,
+        *,
+        emission_guard: EmissionGuard | None,
+    ) -> RuntimeAction:
         if isinstance(node, RespondNode):
             evidence_ref_list: list[str] = []
-            for key in node.requires_success_evidence:
+            evidence_records: list[EvidenceRecord] = []
+            for key in node.requires_evidence:
                 evidence = self.ledger.get(key)
                 if evidence is not None:
+                    evidence_records.append(evidence)
                     evidence_ref_list.append(evidence.event_id)
             evidence_refs = tuple(evidence_ref_list)
-            if node.completion and len(evidence_refs) != len(
-                node.requires_success_evidence
+            if len(evidence_refs) != len(node.requires_evidence):
+                raise RuntimeError(
+                    "terminal response is missing required evidence records"
+                )
+            if node.outcome == ResponseOutcome.COMPLETED and any(
+                evidence.source != EvidenceSource.EXTERNAL
+                or evidence.status != EvidenceStatus.SUCCESS
+                for evidence in evidence_records
             ):
                 raise RuntimeError(
-                    "completion response is missing successful evidence records"
+                    "completed response requires successful external evidence"
                 )
+            if node.outcome == ResponseOutcome.ANSWERED and any(
+                evidence.status == EvidenceStatus.FAILURE
+                for evidence in evidence_records
+            ):
+                raise RuntimeError("answered response cannot cite failed evidence")
+            if node.outcome == ResponseOutcome.DECLINED and not any(
+                evidence.source == EvidenceSource.INPUT
+                and evidence.status == EvidenceStatus.FAILURE
+                and evidence.producer_kind == "confirm"
+                and evidence.value is False
+                for evidence in evidence_records
+            ):
+                raise RuntimeError(
+                    "declined response requires negative-confirmation evidence"
+                )
+            if (
+                node.outcome == ResponseOutcome.FAIL_SAFE
+                and evidence_records
+                and not any(
+                    evidence.status == EvidenceStatus.FAILURE
+                    for evidence in evidence_records
+                )
+            ):
+                raise RuntimeError("fail-safe response cites no failure evidence")
             self._node_status[node.id] = NodeExecutionStatus.SATISFIED
             return RespondAction(
                 node_id=node.id,
+                plan_id=self.plan.plan_id,
                 text=node.text,
-                completion=node.completion,
+                outcome=node.outcome,
                 evidence_refs=evidence_refs,
             )
 
@@ -315,38 +448,57 @@ class ObligationRuntime:
             raise ValueError(f"call_id_factory reused call ID {call_id!r}")
         self._issued_call_ids.add(call_id)
         if isinstance(node, ObserveNode):
+            arguments = _json_copy(node.arguments)
+            _guard_external_emission(
+                "observe", node.operation, arguments, emission_guard
+            )
+            argument_digest = _json_digest(arguments)
             action: RuntimeAction = ExternalCallAction(
                 kind="observe",
                 node_id=node.id,
                 call_id=call_id,
+                plan_id=self.plan.plan_id,
                 operation=node.operation,
-                arguments=node.arguments,
+                arguments=arguments,
+                argument_digest=argument_digest,
+                capability_digest=self.capability_digest,
             )
             operation = node.operation
         elif isinstance(node, ActNode):
+            arguments = _json_copy(node.arguments)
+            _guard_external_emission("act", node.operation, arguments, emission_guard)
+            argument_digest = _json_digest(arguments)
             action = ExternalCallAction(
                 kind="act",
                 node_id=node.id,
                 call_id=call_id,
+                plan_id=self.plan.plan_id,
                 operation=node.operation,
-                arguments=node.arguments,
+                arguments=arguments,
+                argument_digest=argument_digest,
+                capability_digest=self.capability_digest,
             )
             operation = node.operation
         elif isinstance(node, AskNode):
             action = AskAction(
                 node_id=node.id,
                 call_id=call_id,
+                plan_id=self.plan.plan_id,
                 prompt=node.prompt,
             )
             operation = None
+            argument_digest = None
         else:
-            assert isinstance(node, ConfirmNode)
+            if not isinstance(node, ConfirmNode):
+                raise TypeError(f"unsupported plan node type: {type(node).__name__}")
             action = ConfirmAction(
                 node_id=node.id,
                 call_id=call_id,
+                plan_id=self.plan.plan_id,
                 prompt=node.prompt,
             )
             operation = None
+            argument_digest = None
 
         self._node_status[node.id] = NodeExecutionStatus.WAITING
         self._pending = PendingAction(
@@ -354,6 +506,8 @@ class ObligationRuntime:
             call_id=call_id,
             kind=node.kind,
             operation=operation,
+            argument_digest=argument_digest,
+            capability_digest=self.capability_digest,
         )
         return action
 
@@ -365,9 +519,32 @@ class ObligationRuntime:
         self.ledger.update_event_disposition(event.event_id, disposition)
 
 
-def _event_matches_node(event: RuntimeEvent, node: PlanNode) -> bool:
+def _event_matches_pending(
+    event: RuntimeEvent,
+    node: PlanNode,
+    pending: PendingAction,
+    plan_id: str,
+    context_id: str | None,
+) -> bool:
     if isinstance(event, ExternalResultEvent):
-        return isinstance(node, (ObserveNode, ActNode))
+        if not isinstance(node, (ObserveNode, ActNode)):
+            return False
+        if not event.external_call_id:
+            return False
+        required_matches = (
+            event.node_id == pending.node_id,
+            event.operation == pending.operation,
+            event.argument_digest == pending.argument_digest,
+            event.plan_id == plan_id,
+        )
+        if not all(required_matches):
+            return False
+        if (
+            pending.capability_digest is not None
+            and event.schema_digest != pending.capability_digest
+        ):
+            return False
+        return context_id is None or event.context_id == context_id
     if isinstance(event, InputEvent):
         return isinstance(node, AskNode)
     return isinstance(node, ConfirmNode)
@@ -379,3 +556,46 @@ def _evidence_key(node: PlanNode) -> str | None:
     if isinstance(node, (AskNode, ConfirmNode)):
         return node.evidence_key
     return None
+
+
+def _json_digest(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _json_copy(value: dict[str, Any]) -> dict[str, Any]:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    parsed = json.loads(serialized)
+    if not isinstance(parsed, dict):  # pragma: no cover - input is typed as object
+        raise TypeError("operation arguments must be a JSON object")
+    return parsed
+
+
+def _guard_external_emission(
+    kind: Literal["observe", "act"],
+    operation: str,
+    arguments: dict[str, Any],
+    guard: EmissionGuard | None,
+) -> None:
+    if guard is None:
+        raise EmissionRejectedError(
+            "external emission requires a live capability guard"
+        )
+    try:
+        guard(kind, operation, arguments)
+    except Exception as exc:
+        raise EmissionRejectedError(
+            "live capability validation rejected the external operation"
+        ) from exc

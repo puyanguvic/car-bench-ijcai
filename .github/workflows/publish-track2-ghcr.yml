@@ -1,19 +1,12 @@
-name: Publish Track 2 Release Candidate to GHCR
+name: Publish PACT Track 2 Release Candidate to GHCR
 
 on:
   workflow_dispatch:
     inputs:
-      variant:
-        description: "Track 2 agent to publish"
-        required: true
-        type: choice
-        options:
-          - direct
-          - planner_executor
       image_tag:
-        description: "Immutable human-readable release tag (for example, track2-rc1)"
+        description: "Immutable PACT release tag (for example, track2-pact-rc1)"
         required: true
-        default: "track2-rc1"
+        default: "track2-pact-rc1"
         type: string
 
 permissions:
@@ -41,24 +34,14 @@ jobs:
           uv run ruff check src tests scripts generate_compose.py
           uv run pytest -q
 
-      - name: Select release variant
+      # The former planner/executor variant is archived and intentionally has
+      # no publish path. The final Track 2 submission is PACT only.
+      - name: Configure PACT release
         id: config
         shell: bash
         run: |
-          case "${{ inputs.variant }}" in
-            direct)
-              echo "dockerfile=src/track_2_agent_under_test_cerebras/Dockerfile.track-2-agent-under-test-cerebras" >> "$GITHUB_OUTPUT"
-              echo "image=ghcr.io/${{ github.repository_owner }}/car-bench-track-2-direct" >> "$GITHUB_OUTPUT"
-              ;;
-            planner_executor)
-              echo "dockerfile=src/track_2_agent_under_test_cerebras_planner/Dockerfile.track-2-agent-under-test-cerebras-planner" >> "$GITHUB_OUTPUT"
-              echo "image=ghcr.io/${{ github.repository_owner }}/car-bench-track-2-planner-executor" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "Unsupported variant: ${{ inputs.variant }}" >&2
-              exit 1
-              ;;
-          esac
+          echo "dockerfile=src/track_2_agent_under_test_cerebras/Dockerfile.track-2-agent-under-test-cerebras" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${{ github.repository_owner }}/car-bench-track-2-direct" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -96,7 +79,7 @@ jobs:
           {
             echo "## Track 2 image published"
             echo
-            echo "- Variant: \`${{ inputs.variant }}\`"
+            echo "- Agent: \`PACT Track 2 direct Cerebras\`"
             echo "- Image: \`${{ steps.config.outputs.image }}@${{ steps.build.outputs.digest }}\`"
             echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
             echo

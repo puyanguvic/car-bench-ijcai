@@ -207,7 +207,8 @@ class CARBenchAgentExecutor(AgentExecutor):
                 context,
                 messages,
             )
-            if tools_from_msg := self._extract_tools(inbound_message):
+            tools_from_msg = self._extract_tools(inbound_message)
+            if tools_from_msg is not None:
                 tools = tools_from_msg
                 self.ctx_id_to_tools[context.context_id] = tools
 

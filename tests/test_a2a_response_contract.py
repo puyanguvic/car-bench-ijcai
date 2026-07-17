@@ -272,6 +272,23 @@ class A2AResponseContractTest(unittest.TestCase):
         self.assertEqual(result.token_usage.input_tokens, 100)
         self.assertEqual(result.rate_limit_headers.remaining_tokens_minute, 1200.0)
 
+    def test_cerebras_structured_mapping_content_is_canonical_json(self) -> None:
+        fake_sdk = FakeCerebrasSDKClient(
+            [FakeRawResponse(fake_completion(content={"answer": "ok", "count": 2}))]
+        )
+        client = CerebrasCompletionClient(sdk_client=fake_sdk)
+
+        result = client.generate(
+            model="gpt-oss-120b",
+            messages=[{"role": "user", "content": "hello"}],
+            response_schema={"type": "object", "additionalProperties": False},
+            response_schema_name="structured_response",
+            max_completion_tokens=64,
+            temperature=None,
+        )
+
+        self.assertEqual(result.text, '{"answer":"ok","count":2}')
+
     def test_cerebras_executor_temperature_is_omitted_by_default(self) -> None:
         client = CerebrasCompletionClient(
             sdk_client=FakeCerebrasSDKClient([]),
@@ -1169,6 +1186,47 @@ class A2AResponseContractTest(unittest.TestCase):
             response.parts[0].text,
             "I don't currently have that capability, so I can't complete this request.",
         )
+
+    def test_cerebras_explicit_empty_tool_list_revokes_cached_tools(self) -> None:
+        class CapturingExecutor(CerebrasCARBenchAgentExecutor):
+            def __init__(self) -> None:
+                super().__init__(model="gpt-oss-120b")
+                self.tools_seen_by_model = None
+
+            def _call_model_with_retries(self, **kwargs):
+                self.tools_seen_by_model = kwargs["tools"]
+                return AgentInferenceResult(
+                    next_action={
+                        "action": "respond",
+                        "content": "I can't help with that right now.",
+                        "tool_calls": [],
+                    },
+                    elapsed_ms=1.0,
+                    internal_calls=1,
+                )
+
+        context_id = "ctx-tools-revoked"
+        message = create_message_with_parts(
+            parts=[
+                new_text_part("Tell me a joke."),
+                new_data_part({"tools": []}),
+            ],
+            context_id=context_id,
+        )
+        executor = CapturingExecutor()
+        executor.ctx_id_to_tools[context_id] = [fake_tool("stale_tool")]
+        event_queue = FakeEventQueue()
+
+        asyncio.run(
+            executor.execute(
+                FakeRequestContext(message, context_id=context_id),
+                event_queue,
+            )
+        )
+
+        self.assertEqual(executor.tools_seen_by_model, [])
+        self.assertEqual(executor.ctx_id_to_tools[context_id], [])
+        self.assertEqual(len(event_queue.events), 1)
 
     def test_cerebras_prompt_compacts_tool_schema_and_bounds_history(self) -> None:
         verbose_description = "tool description " * 80

@@ -11,8 +11,9 @@ def fake_tool(
     *,
     properties: dict | None = None,
     required: list[str] | None = None,
+    additional_properties: bool | None = None,
 ) -> dict:
-    return {
+    tool = {
         "type": "function",
         "function": {
             "name": name,
@@ -24,6 +25,9 @@ def fake_tool(
             },
         },
     }
+    if additional_properties is not None:
+        tool["function"]["parameters"]["additionalProperties"] = additional_properties
+    return tool
 
 
 def tool_result(tool_name: str, result: dict) -> dict:
@@ -304,9 +308,7 @@ def test_navigation_controller_sets_two_leg_navigation_route() -> None:
     assert action.tool_calls == [
         {
             "tool_name": "set_new_navigation",
-            "arguments": {
-                "route_ids": ["route_ber_bre_fast", "route_bre_ams_fast"]
-            },
+            "arguments": {"route_ids": ["route_ber_bre_fast", "route_bre_ams_fast"]},
         }
     ]
 
@@ -990,6 +992,7 @@ def test_controller_blocks_tool_call_when_current_schema_rejects_arguments() -> 
         fake_tool(
             "navigation_delete_destination",
             properties={"different_argument": {"type": "string"}},
+            additional_properties=False,
         ),
     ]
 

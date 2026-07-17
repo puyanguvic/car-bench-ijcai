@@ -7,9 +7,10 @@ events that produced them, but it does not decide which facts a plan requires.
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +27,23 @@ class EvidenceSource(StrEnum):
 
     EXTERNAL = "external"
     INPUT = "input"
+
+
+class EvidenceStatus(StrEnum):
+    """Whether an evidence record proves success or records a failed outcome."""
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    OBSERVED = "observed"
+
+
+class ActionAuthorization(BaseModel):
+    """One exact external action covered by a user confirmation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    operation: str = Field(min_length=1)
+    argument_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class EventDisposition(StrEnum):
@@ -45,6 +63,13 @@ class ExternalResultEvent(BaseModel):
 
     event_id: str = Field(min_length=1)
     call_id: str = Field(min_length=1)
+    external_call_id: str = Field(min_length=1)
+    context_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
+    node_id: str = Field(min_length=1)
+    operation: str = Field(min_length=1)
+    argument_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    schema_digest: str = Field(min_length=1)
     status: ExternalResultStatus
     payload: Any = None
     error: Any = None
@@ -81,10 +106,18 @@ class EvidenceRecord(BaseModel):
     key: str = Field(min_length=1)
     value: Any
     source: EvidenceSource
+    status: EvidenceStatus = EvidenceStatus.SUCCESS
     event_id: str = Field(min_length=1)
     call_id: str = Field(min_length=1)
     node_id: str = Field(min_length=1)
+    producer_kind: Literal["observe", "ask", "confirm", "act"] | None = None
     operation: str | None = None
+    external_call_id: str | None = None
+    context_id: str | None = None
+    plan_id: str | None = None
+    argument_digest: str | None = None
+    schema_digest: str | None = None
+    authorizations: tuple[ActionAuthorization, ...] = ()
 
 
 class ProcessedEvent(BaseModel):
@@ -163,19 +196,28 @@ class EvidenceLedger:
         return EventRegistration(is_new=True, record=record)
 
     def add(self, record: EvidenceRecord) -> None:
-        """Add one successful evidence record without allowing replacement."""
+        """Add one successful evidence record without allowing replacement.
 
-        existing = self._evidence.get(record.key)
+        Pydantic's ``frozen`` setting is intentionally not treated as deep
+        immutability: JSON objects nested inside a model remain mutable.  The
+        ledger therefore stores an isolated JSON round-trip and returns fresh
+        copies from its read APIs.  Mutating either the event payload supplied
+        by an adapter or a value returned by :meth:`get` cannot rewrite history.
+        """
+
+        isolated = _isolated_model(record)
+        existing = self._evidence.get(isolated.key)
         if existing is None:
-            self._evidence[record.key] = record
+            self._evidence[isolated.key] = isolated
             return
-        if existing != record:
+        if existing != isolated:
             raise ValueError(
-                f"evidence key {record.key!r} already has different provenance"
+                f"evidence key {isolated.key!r} already has different provenance"
             )
 
     def get(self, key: str) -> EvidenceRecord | None:
-        return self._evidence.get(key)
+        record = self._evidence.get(key)
+        return _isolated_model(record) if record is not None else None
 
     def has(self, key: str) -> bool:
         return key in self._evidence
@@ -197,7 +239,7 @@ class EvidenceLedger:
 
     @property
     def evidence(self) -> tuple[EvidenceRecord, ...]:
-        return tuple(self._evidence.values())
+        return tuple(_isolated_model(record) for record in self._evidence.values())
 
     @property
     def processed_events(self) -> tuple[ProcessedEvent, ...]:
@@ -207,10 +249,17 @@ class EvidenceLedger:
 def _event_fingerprint(event: RuntimeEvent) -> str:
     """Return a deterministic representation suitable for replay detection."""
 
-    return json.dumps(
+    payload = json.dumps(
         event.model_dump(mode="json"),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         default=str,
     )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _isolated_model(record: EvidenceRecord) -> EvidenceRecord:
+    """Return a JSON-isolated copy of an evidence record."""
+
+    return EvidenceRecord.model_validate_json(record.model_dump_json())

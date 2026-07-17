@@ -307,6 +307,7 @@ source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "loguru" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -343,6 +344,7 @@ requires-dist = [
     { name = "google-adk", marker = "extra == 'track-1-agent'", specifier = ">=1.14.1" },
     { name = "google-genai", marker = "extra == 'track-1-agent'", specifier = ">=1.36.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jsonschema", specifier = ">=4.23.0" },
     { name = "litellm", marker = "extra == 'track-1-agent'", specifier = ">=1.85.1" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "nest-asyncio", marker = "extra == 'car-bench-evaluator'", specifier = ">=1.6.0" },

@@ -1,0 +1,456 @@
+\documentclass{article}
+\pdfpagewidth=8.5in
+\pdfpageheight=11in
+
+\usepackage{official_template/ijcai26}
+\usepackage{times}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage[utf8]{inputenc}
+\usepackage[small]{caption}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{microtype}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
+
+\urlstyle{same}
+\pdfinfo{/TemplateVersion (IJCAI.2026.0)}
+
+\definecolor{inputblue}{RGB}{225,238,248}
+\definecolor{modelviolet}{RGB}{239,229,247}
+\definecolor{guardorange}{RGB}{252,235,215}
+\definecolor{runtimegreen}{RGB}{224,242,231}
+\definecolor{ledgergray}{RGB}{239,241,244}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\title{PACT: Contract-Verified Receding-Horizon Planning for\
+Compute-Bounded Tool Agents}
+
+\author{
+Pu Yang\\
+\affiliations
+Independent Researcher\\
+\emails
+npuyangpu@gmail.com
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Tool agents often let one language model both interpret intent and authorize
+external effects.  We instead present PACT, a contract-guided Track~2 agent
+that treats its Cerebras-hosted model as an \emph{untrusted semantic
+compiler}.  The model emits a compact strict-schema wire plan; a deterministic
+kernel then performs strict decoding, typed-DAG validation, live Draft~2020--12
+JSON Schema checking, and evidence-aware execution.  PACT exposes at most one
+outstanding action, recompiles short horizons as evidence arrives, scopes
+confirmation to an exact operation--argument--schema triple, and carries
+successful action obligations until a grounded terminal response.  One
+verification-guided repair is permitted.  Provider retries additionally obey
+finite retry and cumulative-wait budgets, while final A2A text responses report
+prompt, completion, and thinking-token metrics.  We state guarantees only for
+local structure, contracts, transitions, and evidence---not for the model's
+interpretation of natural language.  At report freeze, 330 tests plus three
+subtests pass, and one public smoke task completes end to end.  We treat that
+single trajectory as engineering evidence, not a performance estimate.
+\end{abstract}
+
+\section{Introduction}
+
+CAR-bench evaluates whether tool agents act consistently and respect limits
+under ambiguous or incomplete information \cite{kirmayr2026car}.  Through the
+Agent2Agent (A2A) protocol \cite{a2a2026}, the evaluator supplies policy text,
+messages, live tool declarations, and tool results; it alone executes external
+operations.  Track~2 additionally rewards useful behavior under a bounded
+Cerebras inference route.  A ReAct-style loop \cite{yao2023react} is flexible,
+but the same stochastic component commonly interprets the request, constructs
+arguments, decides that preconditions hold, and declares success.
+
+PACT separates those responsibilities.  The LLM translates language into a
+small obligation program, but has no execution authority.  A local monitor
+admits the program only after checking its syntax, graph, current capability
+contracts, resource bounds, confirmations, and evidence dependencies.  This
+resembles proof-carrying code's separation of an untrusted producer from a
+small checker \cite{necula1997pcc} and runtime verification's monitoring of
+concrete executions \cite{leucker2009runtime}; the ``proof'' here is deliberately
+narrower, consisting of checkable structural and provenance conditions.
+
+Our contributions are: (i) a provider-compatible, strict wire format that
+decouples structured generation from dynamic tool schemas; (ii) a typed PlanIR
+and receding-horizon obligation runtime with evidence-grounded outcomes,
+one-shot confirmation, and contract revalidation at emission; and (iii) a
+precise assurance boundary plus reproducible failure-oriented tests and
+compute telemetry.  The trusted kernel is domain-agnostic: it contains no task
+IDs, benchmark utterances, or automotive workflow branches.
+
+\begin{figure*}[t]
+\centering
+\resizebox{0.985\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=5mm and 5.5mm,
+  box/.style={draw=black!68, rounded corners=2pt, align=center,
+              minimum height=10mm, text width=24mm, inner sep=3pt,
+              font=\small},
+  smallbox/.style={box, text width=21mm},
+  arrow/.style={-{Latex[length=2.1mm]}, line width=.72pt, draw=black!72},
+  feedback/.style={arrow, dashed, draw=black!52}
+]
+\node[box, fill=inputblue] (input) {Policy, goal, event\\live tools $T_t$};
+\node[box, fill=modelviolet, right=of input] (llm) {Untrusted semantic\\compiler $C_\theta$};
+\node[smallbox, fill=modelviolet, right=of llm] (wire) {Strict compact wire\\$W_t$ ($\leq5{,}000$ chars)};
+\node[box, fill=guardorange, right=of wire] (verify) {Strict decoder + PlanIR\\static verifier $V$};
+\node[box, fill=runtimegreen, right=of verify] (runtime) {Obligation runtime $K$\\one ready node};
+\node[box, fill=inputblue, right=of runtime] (a2a) {A2A text/tool call\\evaluator result};
+
+\node[box, fill=ledgergray, below=8mm of verify, xshift=-15mm] (ledger) {Immutable provenance\\ledger $E_t$};
+\node[box, fill=ledgergray, right=10mm of ledger] (caps) {Content-addressed live\\capability snapshot};
+\node[box, fill=ledgergray, right=10mm of caps] (oblig) {Confirmation scopes +\\action obligations $O_t$};
+
+\draw[arrow] (input) -- (llm);
+\draw[arrow] (llm) -- (wire);
+\draw[arrow] (wire) -- (verify);
+\draw[arrow] (verify) -- node[above, font=\scriptsize]{accept} (runtime);
+\draw[arrow] (runtime) -- (a2a);
+\draw[feedback] (a2a.south) |- (ledger.east);
+\draw[arrow] (ledger.north) -- ++(0,4mm) -| (llm.south);
+\draw[arrow] (ledger.north east) -- ++(0,2mm) -| (verify.south);
+\draw[arrow] (caps.north) -- (verify.south east);
+\draw[arrow] (caps.north east) -- ++(0,2mm) -| (runtime.south);
+\draw[arrow] (oblig.north) -- ++(0,4mm) -| (runtime.south east);
+
+\begin{scope}[on background layer]
+\node[draw=black!45, dashed, rounded corners=3pt,
+      fit=(llm)(wire), inner sep=3.5mm,
+      label={[font=\scriptsize,text=black!60]above:untrusted}] {};
+\node[draw=black!45, rounded corners=3pt,
+      fit=(verify)(runtime)(ledger)(caps)(oblig), inner sep=3.5mm,
+      label={[font=\scriptsize,text=black!60]below:deterministic trusted boundary}] {};
+\end{scope}
+\end{tikzpicture}}
+\caption{PACT separates semantic proposal from execution authority.  The model
+can only produce a wire candidate.  Local validation yields a typed plan, and
+the runtime emits one externally visible obligation at a time.  Results enter
+future decisions only through the provenance ledger; the live capability
+snapshot is checked both before plan admission and immediately before call
+emission.}
+\label{fig:architecture}
+\end{figure*}
+
+\paragraph{Positioning.}
+PACT is neither a direct model-to-tool interface nor a catalog of
+benchmark-shaped workflows.  Direct tool calling constrains the surface form
+of an action, but syntactically valid JSON does not establish that the named
+operation is still available, its arguments satisfy a changing recursive
+schema, a confirmation applies to this exact effect, or a result supports the
+claimed terminal outcome.  Empirical work on structured generation similarly
+finds a gap between nominal schema conformance and reliable generation across
+real schemas \cite{geng2025structured}.  PACT therefore uses two languages: a
+small provider-facing wire language optimized for constrained decoding, and a
+richer local PlanIR checked against the concrete runtime state.  Conversely,
+unlike a hand-authored finite-state policy, the PlanIR is synthesized anew from
+the current policy, request, evidence, and capabilities.  Selectivity occurs at
+each verified plan horizon: the model proposes semantics, while the kernel owns
+only transitions that are structurally determined by the accepted graph.
+
+\section{PACT Architecture}
+
+\subsection{State and Untrusted Compilation}
+
+For one A2A context $q$, PACT maintains
+\begin{equation}
+ S_t^q=(P,g,H_t,T_t,E_t,G_t,p_t,O_t,M_t),
+ \label{eq:state}
+\end{equation}
+where $P$ is the evaluator-supplied policy, $g$ the current goal, $H_t$ a
+bounded conversation, $T_t$ the live tool contracts, $E_t$ an append-only
+evidence ledger, $G_t$ the accepted plan, $p_t$ its single pending action,
+$O_t$ carried completion obligations, and $M_t$ accumulated inference metrics.
+Context cancellation deletes this state.
+
+The semantic compiler $C_\theta$ receives $P$ in a separate trusted system
+partition and the goal, recent events, $T_t$, and a typed projection of $E_t$
+as task state.  It proposes a wire plan
+\begin{equation}
+ W_t=C_\theta(P,g,H_t,T_t,\operatorname{view}(E_t),O_t).
+ \label{eq:compile}
+\end{equation}
+The provider schema is strict: every object forbids extra properties, and its
+canonical serialization is capped at 5,000 characters to match the
+Cerebras structured-output contract \cite{cerebras2026structured}.  Dynamic
+arguments cannot be represented as an unrestricted object under that contract,
+so each operation node carries an \texttt{arguments\_json} string.  Locally,
+PACT rejects duplicate keys and non-finite numbers, decodes that string to one
+JSON object, and validates it against the actual live schema.  Thus provider
+constrained decoding is an early filter, not the authority.  If local checking
+rejects the first proposal, one repair prompt contains value-redacted typed
+issues; a second rejection terminates safely.  The submitted default is
+\texttt{gpt-oss-120b} at low reasoning effort, leaving the 4,096-token output
+budget primarily for the structured plan.  A provider \texttt{length} finish is
+recorded as typed truncation and is not repaired by repeating the same call;
+empty content is likewise a typed invalid candidate and never reaches PlanIR.
+
+\subsection{Typed PlanIR and Live Verification}
+
+After decoding, a plan is a bounded directed acyclic graph with nodes from
+\[
+ \mathcal N=\{\textsc{Observe},\textsc{Ask},\textsc{Confirm},
+              \textsc{Act},\textsc{Respond}\}.
+\]
+Node IDs and evidence keys are unique; dependencies must exist and be acyclic;
+every node must reach exactly one terminal \textsc{Respond}.  The default
+limits are 20 nodes and dependency depth 12.  \textsc{Observe} and
+\textsc{Act} contain a live operation, constant JSON arguments, and a success
+key.  \textsc{Ask} and \textsc{Confirm} wait for a correlated user event.
+\textsc{Confirm} also names the exact descendant action nodes it authorizes.
+\textsc{Respond} has one typed outcome---\texttt{completed},
+\texttt{answered}, \texttt{refused}, \texttt{declined}, or
+\texttt{fail\_safe}---and an explicit evidence set.
+
+From $T_t$, PACT constructs a canonical, content-addressed capability snapshot.
+Each operation's argument schema is checked and executed with a Draft~2020--12
+validator \cite{jsonschema2020}; nested objects, arrays, formats, numeric
+constraints, combinators, and additional-property rules therefore remain in
+the trusted boundary.  Duplicate or malformed capability declarations fail
+closed.  If trusted metadata labels an operation as \texttt{observe} or
+\texttt{act}, node kind must agree.  PACT does not infer effects from operation
+names; absent metadata is represented as \texttt{unknown} and receives no
+kind-level guarantee.
+
+\subsection{Receding-Horizon Obligation Execution}
+
+Let $\sigma_t(n)\in\{\textit{pending},\textit{waiting},
+\textit{satisfied},\textit{failed}\}$.  The kernel selects the first
+topologically ready node
+\begin{align}
+ R_t={}&\{n\mid\sigma_t(n)=\textit{pending},\notag\\[-1mm]
+       &\quad\forall d\in\operatorname{dep}(n),
+       \sigma_t(d)=\textit{satisfied}\},\\
+ n_t={}&\min_{\prec}R_t.
+ \label{eq:ready}
+\end{align}
+It emits only $n_t$ and then waits.  Immediately before an external call, a
+fresh snapshot must have the same digest, contain the operation, preserve any
+known effect label, and accept a deep-copied argument object.  Ask,
+confirmation, and observation evidence trigger a new short-horizon compile;
+after a successful action, a still-valid accepted graph may advance directly.
+Any successful action key is also placed in $O_t$, so a later horizon cannot
+silently forget a partially completed request.
+
+Every ledger record stores source, status, event/call/node identifiers,
+operation, context/plan IDs, argument and schema digests, and optional
+authorizations.  Values are isolated through a JSON round trip on both write
+and read, preventing nested caller mutation from rewriting history.  Event IDs
+are fingerprinted: identical replay is idempotent, conflicting reuse and
+out-of-order input do not satisfy a node, and explicit external failure creates
+failure evidence and blocks that plan.
+
+Confirmation is capability-conditional and scoped.  For an operation marked
+confirmation-required, the verifier accepts either an ancestor
+\textsc{Confirm} authorizing that action node or a prior true confirmation
+record matching
+\begin{equation}
+ (\operatorname{schemaDigest},\operatorname{operation},
+   \operatorname{SHA256}(\operatorname{arguments})).
+ \label{eq:scope}
+\end{equation}
+The adapter consumes that scope after the matching action succeeds; it is not a
+general authorization for subsequent calls.
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{3.2pt}
+\begin{tabular}{@{}L{.20\columnwidth}L{.31\columnwidth}L{.39\columnwidth}@{}}
+\toprule
+Boundary & Untrusted proposal & Local authority\\
+\midrule
+Wire & JSON characters & strict unique-key decode\\
+IR & nodes, dependencies, outcome & frozen typed DAG + bounds\\
+Capability & operation and arguments & live Draft~2020--12 schema\\
+Transition & claimed next step & one ready node + matched event\\
+Terminal & response text and class & evidence and obligation checks\\
+\bottomrule
+\end{tabular}
+\caption{The model supplies semantic candidates; each executable property has
+a separate deterministic decision point.}
+\label{tab:authority}
+\end{table}
+
+\section{Assurance and Compute Bounds}
+
+We distinguish properties checked by code from assumptions about its inputs.
+Suppose the adapter is the only emission path, the live capability declaration
+is a valid schema, and hashing/JSON validation behave as specified.
+
+\paragraph{Capability and schema confinement.}
+If PACT emits external call $a_t=(o,x)$, then $o\in T_t$ and
+$x\models\operatorname{schema}_{T_t}(o)$.  The verifier establishes this for
+the accepted immutable plan; the emission guard repeats both membership and
+validation on a fresh digest-matched snapshot.  Mutation or revocation between
+the two checks yields no call.
+
+\paragraph{Grounded completion.}
+For a typed \texttt{completed} response, PlanIR requires at least one action or
+carried evidence, the verifier requires every current action-success key and
+every key in $O_t$ in the terminal evidence set, and carried keys must be
+successful external action records.  At emission, every cited record must be
+external with status \texttt{success}.  Hence no failed, user-authored,
+missing, or merely planned event can justify completion.  Informational
+\texttt{answered} plans contain no action and cite their observation results;
+\texttt{refused} plans contain no external call; and \texttt{declined}
+requires a false confirmation record.  Emergency \texttt{fail\_safe} output
+is intentionally available even when a compiler or protocol failure prevents
+constructing failure evidence, but it never claims completion.
+
+\paragraph{Transition confinement.}
+Within the kernel, at most one node is waiting.  Only a type-compatible event
+for that internal call can change it to satisfied.  External events additionally
+match context, plan, node, operation, argument digest, schema digest, and a
+nonempty evaluator call ID.  This establishes replay/idempotency properties
+\emph{after} the A2A adapter has correlated the sole returned result; the
+protocol limitation below is material.
+
+\paragraph{Why failures cannot escalate (proof sketch).}
+Proceed by induction over processed events.  Initially $E_0$ is empty and no
+node is satisfied.  Registration of an unmatched event changes only its audit
+disposition.  A matched input event can satisfy only the pending
+\textsc{Ask}/\textsc{Confirm}.  A matched external event creates success
+evidence only when its explicit status is \texttt{success}; failure instead
+creates a distinct failure key and marks the node failed.  Duplicate and
+conflicting event IDs do not change the first stored record.  Therefore none of
+these cases can manufacture a successful action record.  The completion guard
+consults only such records, preserving the invariant.
+
+\paragraph{Why prior actions cannot be forgotten (proof sketch).}
+Within one goal, $O_t$ grows after each satisfied \textsc{Act} and is cleared
+only at a terminal or explicit safe termination.  Every new compiler request
+receives $O_t$.  The verifier rejects a carried key that is not a successful
+external action and rejects a completed terminal omitting any member of $O_t$.
+Thus, by induction over horizons, a reported completion accounts for all
+earlier effects.  If a later obligation fails, the adapter instead emits
+partial-failure text.
+
+\paragraph{Why confirmation is scope-limited (proof sketch).}
+For an annotated capability, admission requires either an authorizing ancestor
+in the same immutable plan or a true ledger record whose schema, operation, and
+argument digests match.  After a matching action succeeds, the adapter removes
+that individual authorization from the compiler-visible evidence projection.
+A record may intentionally hold multiple action scopes, but each exact scope is
+consumed independently; changing any tuple component makes it unusable.
+
+\paragraph{Bounded inference and telemetry.}
+For compiler request $j$, with repair indicator $r_j\in\{0,1\}$,
+\begin{equation}
+ N_j=1+r_j\leq2.
+ \label{eq:calls}
+\end{equation}
+Input length, conversation count, evidence count, candidate size, graph size,
+and graph depth have independent local ceilings.  Provider rate-limit handling
+uses a finite retry limit $R_{\max}$ and cumulative wait limit $W_{\max}$,
+including proactive pacing and reactive header-aware backoff; exhaustion raises
+a typed error rather than waiting indefinitely.  Across tool turns, provider
+usage is accumulated until the next text response and exported as A2A
+\texttt{turn\_metrics}.  Competition-accounted usage is
+\begin{equation}
+ B(q)=\sum_{j\in q}(p_j+c_j+h_j),
+ \label{eq:tokens}
+\end{equation}
+for reported prompt, completion, and thinking tokens.  Call count, mean call
+time, model, cost, repair passes, and quota wait are reported alongside them;
+safe-error text includes the usage available from failed verification attempts.
+
+\subsection{Progress and Liveness Boundary}
+
+Safety does not imply that every request completes.  For one accepted horizon
+that is not invalidated or replaced, suppose every emitted Ask/Confirm receives
+a compatible user event, every emitted external call receives one well-formed
+evaluator result, and the capability digest remains stable.  Each such event
+changes exactly one waiting node to either satisfied or failed.  Because the
+graph is finite and acyclic and no satisfied node is reissued, the horizon
+reaches its terminal response or a blocked state after at most $|\mathcal N|$
+node emissions.  Stable topological ordering makes the chosen trace
+deterministic when multiple independent nodes are ready.
+
+These assumptions are intentionally stronger than the deployed environment.
+A user may never answer, a provider may exhaust its retry budget, an evaluator
+may return malformed data, or a capability can be revoked.  PACT preserves the
+outstanding obligation while waiting and otherwise chooses safe termination;
+it does not fabricate progress.  Receding-horizon recompilation also prevents a
+global termination theorem: a sequence of new user events can keep changing
+the semantic goal.  What is bounded is each compilation and each accepted-plan
+transition, not the number of possible interactions in an open conversation.
+
+\section{Engineering Evaluation and Limits}
+
+We evaluate the artifact's enforceable mechanisms, not hidden outcomes.  A
+clean local run on 17 July 2026 passed 330 tests plus three subtests in the
+repository; 168 tests directly target PlanIR, the verifier, compiler, ledger,
+runtime, A2A adapter, full JSON Schema guard, and bounded Cerebras retries.
+Representative adversarial cases include cycles and unreachable terminals;
+nested schema and contract-revocation failures; duplicate, stale, malformed,
+wrong-operation and wrong-digest results; deep mutation; confirmation replay;
+forgotten prior actions; exhausted repair; context cancellation; and metric
+preservation on safe errors.  Generic non-automotive schemas exercise the same
+kernel.  These checks are deterministic and reproducible with
+\texttt{uv run pytest -q}; they do not estimate CAR-bench reward or three-trial
+consistency.
+
+\paragraph{Single-task public smoke.}
+Using the submitted low reasoning setting, one run of public train task
+\texttt{base\_0} earned reward 1.0.  Its action, tool subset, tool execution,
+policy, and user-ending subrewards each reached 1.0.  The trace read state,
+obtained shade confirmation and executed the adjustment, read weather,
+confirmed the rain-dependent operation, set the sunroof to 50\%, and emitted
+evidence-grounded completion.  No missing-tool, execution, or policy error
+occurred.  Across
+three user turns it made seven compiler completion calls, including a local
+repair: 97,922 prompt, 3,972 completion, and 2,032 thinking tokens (103,926 by
+Equation~\ref{eq:tokens}), with 360,753.4\,ms quota wait.  Every observed
+provider response had \texttt{finish\_reason=stop}.  This validates one
+end-to-end evidence closure, not aggregate CAR-bench quality.
+
+An earlier configuration canary explains the low default: at high reasoning, a
+12,861-token prompt consumed the 4,096-token completion ceiling, of which 4,093
+were thinking tokens, and returned \texttt{finish\_reason=length} with no
+content.  PACT now records that condition as truncation, preserves its usage,
+skips futile semantic repair, and fails safely.
+
+The final runtime closure also passes Ruff and mypy over 16 production files; a
+local \texttt{linux/amd64} image starts and serves its A2A Agent Card.  This
+establishes quality, packaging, and reachability---not digest-pinned public GHCR
+validation or live task performance.
+
+\paragraph{Operational reproducibility.}
+The release image contains only PACT dependencies and runs unprivileged on
+pinned bases.  Environment variables configure inference and retry controls;
+the API key is supplied only at runtime.  Audit records retain hashes and
+value-redacted issues.  Context locks serialize turns, while cancellation
+deletes their state.  Hashes are not signatures, and the ledger is not durable.
+
+The assurance boundary has three important limitations.  First, local
+verification cannot prove that the model correctly interpreted natural-language
+policy, goal, or tool description.  Typed citations and outcomes improve
+auditability but are not semantic proofs.  Second, an operation whose trusted
+effect metadata is \texttt{unknown} can be structurally valid under either
+\textsc{Observe} or \textsc{Act}; confirmation guarantees apply only to
+explicitly annotated capabilities.  Third, the current A2A tool-call payload
+does not let the agent attach its internal nonce to the evaluator's outbound
+call ID.  PACT therefore permits exactly one outstanding external obligation
+and checks returned operation plus a nonempty evaluator ID, but it cannot
+cryptographically distinguish an exact response from an evaluator replay of an
+identical call.  This is a protocol trust assumption, not a proven property.
+
+PACT's central result is architectural: stochastic inference proposes meaning,
+while a small deterministic layer owns capability admission, evidence-bearing
+state changes, and terminal truth conditions.  This separation supports
+compute-bounded execution without benchmark-specific workflows and makes both
+the achieved guarantees and the remaining semantic uncertainty explicit.
+
+\bibliographystyle{official_template/named}
+\bibliography{references}
+
+\end{document}
