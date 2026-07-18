@@ -9,6 +9,17 @@ render, validate, or submit that archived source-only variant.
 Do not put any API key or secret value in the final TOML. It must contain only
 environment-variable interpolation expressions.
 
+## Ready-to-submit artifacts
+
+- [`track_2_direct/scenario.toml`](track_2_direct/scenario.toml): validated
+  hidden-set TOML with the final digest.
+- [`track_2_direct/FORM_ANSWERS.md`](track_2_direct/FORM_ANSWERS.md): copy-paste
+  answers in form order.
+- [`track_2_direct/OPTION_C_VALIDATION.md`](track_2_direct/OPTION_C_VALIDATION.md):
+  public-image and A2A validation record.
+- [`technical_report/PACT_CAR-bench_Track2_Technical_Report.pdf`](technical_report/PACT_CAR-bench_Track2_Technical_Report.pdf):
+  four-page IJCAI-format report.
+
 ## Release checklist
 
 1. Build the PACT agent for `linux/amd64`.

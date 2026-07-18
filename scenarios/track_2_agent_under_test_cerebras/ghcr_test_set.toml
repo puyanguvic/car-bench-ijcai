@@ -1,12 +1,12 @@
-# Option C public test-set scenario for the PACT Track 2 image.
-# Replace the digest placeholder with the final public linux/amd64 image.
+# Option C public test-set scenario for the final PACT Track 2 image.
+# Built from source revision 3255c9320bfa36e3fe0c4647ffc401b78e7259a6.
 
 [evaluator]
 image = "ghcr.io/car-bench/car-bench-evaluator:latest"
 env = { GEMINI_API_KEY = "${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}", LOGURU_LEVEL = "${LOGURU_LEVEL:-INFO}" }
 
 [agent_under_test]
-image = "ghcr.io/puyanguvic/car-bench-track-2-direct@sha256:REPLACE_WITH_PUBLIC_IMAGE_DIGEST"
+image = "ghcr.io/puyanguvic/car-bench-track-2-direct@sha256:173fd630e1691b40af55e731e82023c1df9cfcae52d3b84420c1d307eccea6d1"
 
 [agent_under_test.env]
 CEREBRAS_API_KEY = "${CEREBRAS_API_KEY:?Set CEREBRAS_API_KEY in .env}"

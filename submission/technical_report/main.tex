@@ -410,9 +410,10 @@ thinking tokens (101,894 total), with 360,753.4\,ms quota wait.  It predates the
 final audit/control suffix and is not a performance estimate.  A separate
 truncation canary motivated the 8,192 ceiling and typed fail-closed handling.
 
-The final closure also passes Ruff and mypy over 18 release files; a local
-\texttt{linux/amd64} image serves its A2A Agent Card.  This establishes local
-quality and reachability, not public-image validation or live performance.
+The final closure also passes Ruff and mypy over 18 release files.  The public,
+digest-pinned \texttt{linux/amd64} image completed README Option C with client
+exit code zero.  This establishes packaging/A2A compatibility, not live
+performance; the personal development quota expired during that smoke run.
 
 \paragraph{Operational reproducibility.}
 The selective image runs unprivileged on pinned bases; secrets enter only at

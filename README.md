@@ -328,6 +328,7 @@ provenance platform descriptor:
 
 ```bash
 gh workflow run publish-track2-ghcr.yml \
+  --repo puyanguvic/car-bench-ijcai \
   --ref YOUR_RELEASE_BRANCH \
   -f image_tag=track2-pact-final
 ```
