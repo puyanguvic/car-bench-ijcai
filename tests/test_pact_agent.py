@@ -313,6 +313,13 @@ def compile_plan(
     return factory
 
 
+def compile_response(text_value: str) -> OutcomeFactory:
+    def factory(request: CompilationRequest) -> CompilationResult:
+        return result_for(request, response_plan(request, text=text_value))
+
+    return factory
+
+
 def inbound_message(
     *,
     context_id: str,
@@ -630,46 +637,8 @@ def test_explicit_empty_tools_revoke_the_previous_capability_snapshot() -> None:
     assert executor.context_states["ctx-revoke"].tools == []
 
 
-def test_confirmation_yes_recompiles_with_correlated_input_evidence() -> None:
-    def accepted_confirmation(request: CompilationRequest) -> CompilationResult:
-        assert request.current_user_event == "yes, proceed"
-        assert len(request.evidence) == 1
-        confirmation = request.evidence[0]
-        assert confirmation.key == "change.approved"
-        assert confirmation.value is True
-        assert confirmation.source == EvidenceSource.INPUT
-        assert confirmation.status == EvidenceStatus.OBSERVED
-        assert confirmation.producer_kind == "confirm"
-        assert confirmation.context_id == "ctx-confirm-yes"
-        assert confirmation.plan_id == compiler.requests[0].plan_id
-        assert (
-            confirmation.schema_digest
-            == CapabilitySnapshot.from_tools(
-                compiler.requests[0].as_tool_declarations()
-            ).digest
-        )
-        assert len(confirmation.authorizations) == 1
-        authorization = confirmation.authorizations[0]
-        assert authorization.operation == "set_mode"
-        assert (
-            authorization.argument_digest
-            == hashlib.sha256(
-                json.dumps(
-                    {"mode": "eco"},
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
-        )
-        plan = response_plan(
-            request,
-            text="Confirmation recorded.",
-            evidence_inputs=(confirmation.key,),
-            requires_evidence=(confirmation.key,),
-        )
-        return result_for(request, plan)
-
-    compiler = FakeCompiler(compile_plan(confirmation_plan), accepted_confirmation)
+def test_confirmation_yes_continues_the_verified_plan_without_recompiling() -> None:
+    compiler = FakeCompiler(compile_plan(confirmation_plan))
     executor = PACTAgentExecutor(compiler=compiler, model="test-model")
     live_tools = [
         tool(
@@ -694,14 +663,392 @@ def test_confirmation_yes_recompiles_with_correlated_input_evidence() -> None:
     )
     assert text(ambiguous) == "Please answer yes or no."
     assert len(compiler.requests) == 1
+    original_runtime = executor.context_states["ctx-confirm-yes"].runtime
+    assert original_runtime is not None
+    original_plan_id = original_runtime.plan.plan_id
 
     accepted = run_turn(
         executor,
         context_id="ctx-confirm-yes",
-        text="yes, proceed",
+        text="yes, proceed with eco mode please",
     )
-    assert text(accepted) == "Confirmation recorded."
+    assert tool_call(accepted) == {
+        "tool_name": "set_mode",
+        "arguments": {"mode": "eco"},
+    }
+    assert len(compiler.requests) == 1
+    state = executor.context_states["ctx-confirm-yes"]
+    assert state.runtime is original_runtime
+    assert state.runtime.plan.plan_id == original_plan_id
+
+    confirmation = state.ledger.get("change.approved")
+    assert confirmation is not None
+    assert confirmation.value is True
+    assert confirmation.source == EvidenceSource.INPUT
+    assert confirmation.status == EvidenceStatus.OBSERVED
+    assert confirmation.producer_kind == "confirm"
+    assert confirmation.context_id == "ctx-confirm-yes"
+    assert confirmation.plan_id == original_plan_id
+    assert (
+        confirmation.schema_digest
+        == CapabilitySnapshot.from_tools(
+            compiler.requests[0].as_tool_declarations()
+        ).digest
+    )
+    assert len(confirmation.authorizations) == 1
+    authorization = confirmation.authorizations[0]
+    assert authorization.operation == "set_mode"
+    assert (
+        authorization.argument_digest
+        == hashlib.sha256(
+            json.dumps(
+                {"mode": "eco"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+
+    completed = run_turn(
+        executor,
+        context_id="ctx-confirm-yes",
+        tool_results=[
+            success_result(
+                "set_mode",
+                call_id="evaluator-confirmed-set-mode",
+                payload={"mode": "eco"},
+            )
+        ],
+    )
+    assert text(completed) == "Mode changed."
+    assert len(compiler.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "revision",
+    (
+        "Yes, but use sport instead.",
+        "Yes, make it 75% please.",
+        "Yes, Alice.",
+        "Yes, sport.",
+        "Yes, off.",
+    ),
+)
+def test_qualified_confirmation_replans_without_authorizing_old_arguments(
+    revision: str,
+) -> None:
+    compiler = FakeCompiler(
+        compile_plan(confirmation_plan),
+        compile_response("I treated that as a revised request."),
+    )
+    executor = PACTAgentExecutor(compiler=compiler, model="test-model")
+    live_tools = [
+        tool(
+            "set_mode",
+            effect="act",
+            properties={"mode": {"type": "string"}},
+            required=["mode"],
+        )
+    ]
+    run_turn(
+        executor,
+        context_id="ctx-confirm-revision",
+        text="Change the mode.",
+        tools=live_tools,
+    )
+
+    revised = run_turn(
+        executor,
+        context_id="ctx-confirm-revision",
+        text=revision,
+    )
+
+    assert text(revised) == "I treated that as a revised request."
     assert len(compiler.requests) == 2
+    assert compiler.requests[1].current_user_event == revision
+    assert (
+        executor.context_states["ctx-confirm-revision"].ledger.get("change.approved")
+        is None
+    )
+
+
+def test_confirmation_may_restate_the_exact_numeric_scope() -> None:
+    def numeric_confirmation_plan(request: CompilationRequest) -> PlanIR:
+        return PlanIR(
+            plan_id=request.plan_id,
+            nodes=(
+                ConfirmNode(
+                    id="confirm",
+                    prompt="Proceed with level 100?",
+                    evidence_key="level.approved",
+                    authorizes=("act",),
+                ),
+                ActNode(
+                    id="act",
+                    depends_on=("confirm",),
+                    operation="set_level",
+                    arguments={"level": 100},
+                    success_evidence_key="level.changed",
+                ),
+                RespondNode(
+                    id="respond",
+                    depends_on=("act",),
+                    text="Level changed.",
+                    outcome=ResponseOutcome.COMPLETED,
+                    requires_evidence=("level.changed",),
+                ),
+            ),
+        )
+
+    compiler = FakeCompiler(compile_plan(numeric_confirmation_plan))
+    executor = PACTAgentExecutor(compiler=compiler, model="test-model")
+    run_turn(
+        executor,
+        context_id="ctx-confirm-exact-number",
+        text="Set the level.",
+        tools=[
+            tool(
+                "set_level",
+                effect="act",
+                properties={"level": {"type": "integer"}},
+                required=["level"],
+            )
+        ],
+    )
+
+    accepted = run_turn(
+        executor,
+        context_id="ctx-confirm-exact-number",
+        text="Yes, go ahead at 100%.",
+    )
+
+    assert tool_call(accepted) == {
+        "tool_name": "set_level",
+        "arguments": {"level": 100.0},
+    }
+    assert len(compiler.requests) == 1
+
+
+def test_confirmation_may_restate_exact_extent_and_operation_scope() -> None:
+    def extent_confirmation_plan(request: CompilationRequest) -> PlanIR:
+        return PlanIR(
+            plan_id=request.plan_id,
+            nodes=(
+                ConfirmNode(
+                    id="confirm",
+                    prompt="Proceed with the full adjustment?",
+                    evidence_key="level.approved",
+                    authorizes=("act",),
+                ),
+                ActNode(
+                    id="act",
+                    depends_on=("confirm",),
+                    operation="open_close_panel",
+                    arguments={"percentage": 100},
+                    success_evidence_key="panel.changed",
+                ),
+                RespondNode(
+                    id="respond",
+                    depends_on=("act",),
+                    text="Panel changed.",
+                    outcome=ResponseOutcome.COMPLETED,
+                    requires_evidence=("panel.changed",),
+                ),
+            ),
+        )
+
+    compiler = FakeCompiler(compile_plan(extent_confirmation_plan))
+    executor = PACTAgentExecutor(compiler=compiler, model="test-model")
+    run_turn(
+        executor,
+        context_id="ctx-confirm-exact-extent",
+        text="Adjust the panel.",
+        tools=[
+            tool(
+                "open_close_panel",
+                effect="act",
+                properties={"percentage": {"type": "integer"}},
+                required=["percentage"],
+            )
+        ],
+    )
+
+    accepted = run_turn(
+        executor,
+        context_id="ctx-confirm-exact-extent",
+        text="Yeah, that's fine. Go ahead and open the panel all the way.",
+    )
+
+    assert tool_call(accepted) == {
+        "tool_name": "open_close_panel",
+        "arguments": {"percentage": 100.0},
+    }
+    assert len(compiler.requests) == 1
+
+
+def completed_precondition_confirmation_plan(request: CompilationRequest) -> PlanIR:
+    return PlanIR(
+        plan_id=request.plan_id,
+        nodes=(
+            ActNode(
+                id="prepare",
+                operation="open_close_protectivecover",
+                arguments={"percentage": 100},
+                success_evidence_key="cover.opened",
+            ),
+            ConfirmNode(
+                id="confirm",
+                depends_on=("prepare",),
+                prompt="Proceed with opening the panel halfway?",
+                evidence_key="panel.approved",
+                authorizes=("open",),
+            ),
+            ActNode(
+                id="open",
+                depends_on=("confirm",),
+                operation="open_close_accesspanel",
+                arguments={"percentage": 50},
+                success_evidence_key="panel.opened",
+            ),
+            RespondNode(
+                id="respond",
+                depends_on=("open",),
+                text="Panel opened.",
+                outcome=ResponseOutcome.COMPLETED,
+                requires_evidence=("cover.opened", "panel.opened"),
+            ),
+        ),
+    )
+
+
+def _prepare_completed_precondition_confirmation(
+    executor: PACTAgentExecutor,
+    *,
+    context_id: str,
+) -> None:
+    first = run_turn(
+        executor,
+        context_id=context_id,
+        text="Open the panel halfway.",
+        tools=[
+            tool(
+                "open_close_protectivecover",
+                effect="act",
+                properties={"percentage": {"type": "integer"}},
+                required=["percentage"],
+            ),
+            tool(
+                "open_close_accesspanel",
+                effect="act",
+                properties={"percentage": {"type": "integer"}},
+                required=["percentage"],
+            ),
+        ],
+    )
+    assert tool_call(first)["tool_name"] == "open_close_protectivecover"
+    confirmation = run_turn(
+        executor,
+        context_id=context_id,
+        tool_results=[
+            success_result(
+                "open_close_protectivecover",
+                call_id="evaluator-cover",
+                payload={"percentage": 100},
+            )
+        ],
+    )
+    assert text(confirmation) == "Proceed with opening the panel halfway?"
+
+
+def test_confirmation_allows_exact_restatement_of_completed_precondition() -> None:
+    compiler = FakeCompiler(compile_plan(completed_precondition_confirmation_plan))
+    executor = PACTAgentExecutor(compiler=compiler, model="test-model")
+    _prepare_completed_precondition_confirmation(
+        executor,
+        context_id="ctx-confirm-completed-precondition",
+    )
+
+    accepted = run_turn(
+        executor,
+        context_id="ctx-confirm-completed-precondition",
+        text=(
+            "Yes, that's right. And if the cover needs to open first, "
+            "please open it all the way."
+        ),
+    )
+
+    assert tool_call(accepted) == {
+        "tool_name": "open_close_accesspanel",
+        "arguments": {"percentage": 50.0},
+    }
+    assert len(compiler.requests) == 1
+
+
+def test_confirmation_rejects_new_extent_for_authorized_action_even_with_completed_scope() -> None:
+    compiler = FakeCompiler(
+        compile_plan(completed_precondition_confirmation_plan),
+        compile_response("I treated that as a revised request."),
+    )
+    executor = PACTAgentExecutor(compiler=compiler, model="test-model")
+    _prepare_completed_precondition_confirmation(
+        executor,
+        context_id="ctx-confirm-authorized-mismatch",
+    )
+
+    revised = run_turn(
+        executor,
+        context_id="ctx-confirm-authorized-mismatch",
+        text=(
+            "Yes, open the panel all the way; the cover should stay all the way open."
+        ),
+    )
+
+    assert text(revised) == "I treated that as a revised request."
+    assert len(compiler.requests) == 2
+    assert (
+        executor.context_states["ctx-confirm-authorized-mismatch"].ledger.get(
+            "panel.approved"
+        )
+        is None
+    )
+
+
+def test_confirmation_does_not_cross_a_changed_capability_digest() -> None:
+    compiler = FakeCompiler(
+        compile_plan(confirmation_plan),
+        compile_response("The capability contract changed."),
+    )
+    executor = PACTAgentExecutor(compiler=compiler, model="test-model")
+    original_tool = tool(
+        "set_mode",
+        effect="act",
+        properties={"mode": {"type": "string"}},
+        required=["mode"],
+    )
+    run_turn(
+        executor,
+        context_id="ctx-confirm-contract-change",
+        text="Change the mode.",
+        tools=[original_tool],
+    )
+    changed_tool = json.loads(json.dumps(original_tool))
+    changed_tool["function"]["description"] = "A materially changed contract"
+
+    response = run_turn(
+        executor,
+        context_id="ctx-confirm-contract-change",
+        text="yes",
+        tools=[changed_tool],
+    )
+
+    assert text(response) == "The capability contract changed."
+    assert len(compiler.requests) == 2
+    assert (
+        executor.context_states["ctx-confirm-contract-change"].ledger.get(
+            "change.approved"
+        )
+        is None
+    )
 
 
 def test_confirmation_no_declines_without_recompiling_or_calling_a_tool() -> None:
@@ -735,6 +1082,40 @@ def test_confirmation_no_declines_without_recompiling_or_calling_a_tool() -> Non
     assert decision.value is False
     assert decision.status == EvidenceStatus.FAILURE
     assert state.runtime is None
+
+
+def test_decline_after_completed_precondition_discloses_partial_effect() -> None:
+    compiler = FakeCompiler(compile_plan(completed_precondition_confirmation_plan))
+    executor = PACTAgentExecutor(compiler=compiler, model="test-model")
+    context_id = "ctx-confirm-no-after-precondition"
+    _prepare_completed_precondition_confirmation(
+        executor,
+        context_id=context_id,
+    )
+
+    declined = run_turn(
+        executor,
+        context_id=context_id,
+        text="No, stop there.",
+    )
+
+    assert text(declined) == (
+        "I completed part of the request, and I won't proceed with the remaining "
+        "action."
+    )
+    assert len(compiler.requests) == 1
+    state = executor.context_states[context_id]
+    completed = state.ledger.get("cover.opened")
+    decision = state.ledger.get("panel.approved")
+    assert completed is not None
+    assert completed.status == EvidenceStatus.SUCCESS
+    assert completed.producer_kind == "act"
+    assert decision is not None
+    assert decision.value is False
+    assert decision.status == EvidenceStatus.FAILURE
+    assert state.runtime is None
+    assert state.goal == ""
+    assert state.required_completion_evidence == set()
 
 
 def test_context_state_is_isolated_and_cancel_removes_only_the_target() -> None:
@@ -927,36 +1308,35 @@ def test_confirmation_authorization_is_consumed_before_the_next_horizon() -> Non
         tool("read_mode", effect="observe"),
     ]
 
-    def act_then_observe(request: CompilationRequest) -> CompilationResult:
-        confirmation = next(
-            item for item in request.evidence if item.key == "change.approved"
-        )
-        assert len(confirmation.authorizations) == 1
-        return result_for(
-            request,
-            PlanIR(
-                plan_id=request.plan_id,
-                evidence_inputs=(confirmation.key,),
-                nodes=(
-                    ActNode(
-                        id="act",
-                        operation="set_mode",
-                        arguments={"mode": "eco"},
-                        success_evidence_key="mode.changed",
-                    ),
-                    ObserveNode(
-                        id="observe",
-                        depends_on=("act",),
-                        operation="read_mode",
-                        success_evidence_key="mode.observed",
-                    ),
-                    RespondNode(
-                        id="respond",
-                        depends_on=("observe",),
-                        text="Mode changed and verified.",
-                        outcome=ResponseOutcome.COMPLETED,
-                        requires_evidence=("mode.changed", "mode.observed"),
-                    ),
+    def confirmation_then_act_and_observe(request: CompilationRequest) -> PlanIR:
+        return PlanIR(
+            plan_id=request.plan_id,
+            nodes=(
+                ConfirmNode(
+                    id="confirm",
+                    prompt="Proceed with the change?",
+                    evidence_key="change.approved",
+                    authorizes=("act",),
+                ),
+                ActNode(
+                    id="act",
+                    depends_on=("confirm",),
+                    operation="set_mode",
+                    arguments={"mode": "eco"},
+                    success_evidence_key="mode.changed",
+                ),
+                ObserveNode(
+                    id="observe",
+                    depends_on=("act",),
+                    operation="read_mode",
+                    success_evidence_key="mode.observed",
+                ),
+                RespondNode(
+                    id="respond",
+                    depends_on=("observe",),
+                    text="Mode changed and verified.",
+                    outcome=ResponseOutcome.COMPLETED,
+                    requires_evidence=("mode.changed", "mode.observed"),
                 ),
             ),
         )
@@ -1011,8 +1391,7 @@ def test_confirmation_authorization_is_consumed_before_the_next_horizon() -> Non
         )
 
     compiler = FakeCompiler(
-        compile_plan(confirmation_plan),
-        act_then_observe,
+        compile_plan(confirmation_then_act_and_observe),
         verify_consumed_scope,
     )
     executor = PACTAgentExecutor(compiler=compiler, model="test-model")
@@ -1058,7 +1437,7 @@ def test_confirmation_authorization_is_consumed_before_the_next_horizon() -> Non
     )
 
     assert text(completed) == "Mode changed and verified."
-    assert len(compiler.requests) == 3
+    assert len(compiler.requests) == 2
     persisted_confirmation = executor.context_states[
         "ctx-one-shot-confirmation"
     ].ledger.get("change.approved")
@@ -1253,7 +1632,10 @@ def test_a2a_message_id_derives_deterministic_input_event_ids(
             ),
         )
 
-    compiler = FakeCompiler(compile_plan(builder), answer_from_input)
+    compiler = FakeCompiler(
+        compile_plan(builder),
+        *(() if builder is confirmation_plan else (answer_from_input,)),
+    )
     executor = PACTAgentExecutor(compiler=compiler, model="test-model")
     live_tools = (
         [
@@ -1287,7 +1669,15 @@ def test_a2a_message_id_derives_deterministic_input_event_ids(
         message_id="stable-a2a-answer-message",
     )
 
-    assert text(response) == "Input recorded."
+    if builder is confirmation_plan:
+        assert tool_call(response) == {
+            "tool_name": "set_mode",
+            "arguments": {"mode": "eco"},
+        }
+        assert len(compiler.requests) == 1
+    else:
+        assert text(response) == "Input recorded."
+        assert len(compiler.requests) == 2
     record = state.ledger.get(evidence_key)
     assert record is not None
     expected = _input_event_id(

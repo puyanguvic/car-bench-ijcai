@@ -38,6 +38,23 @@ from .tool_index import ToolIndex
 IssueStage = Literal["capability", "ir", "bounds", "schema", "safety", "evidence"]
 IssueSeverity = Literal["error", "warning"]
 CapabilityEffect = Literal["unknown", "observe", "act"]
+REQUIRES_CONFIRMATION_MARKER = "REQUIRES_CONFIRMATION"
+
+
+def description_requires_confirmation(description: str) -> bool:
+    """Recognize the evaluator's anchored confirmation contract marker.
+
+    Only a marker at the beginning of a trusted function description counts.
+    User text and model output never flow through this parser.  The boundary
+    check avoids treating a longer identifier that merely shares the prefix as
+    a confirmation requirement.
+    """
+
+    normalized = description.lstrip()
+    if not normalized.startswith(REQUIRES_CONFIRMATION_MARKER):
+        return False
+    suffix = normalized[len(REQUIRES_CONFIRMATION_MARKER) :]
+    return not suffix or suffix[0] in {",", ":", " ", "\t", "\r", "\n"}
 
 
 @dataclass(frozen=True)
@@ -217,7 +234,11 @@ class CapabilitySnapshot:
                 continue
 
             extension = function.get("x-pact-requires-confirmation", False)
-            requires_confirmation = operation in critical or extension is True
+            requires_confirmation = (
+                operation in critical
+                or extension is True
+                or description_requires_confirmation(description)
+            )
             raw_effect = trusted_effects.get(
                 operation,
                 function.get("x-pact-effect", "unknown"),
@@ -914,4 +935,5 @@ __all__ = [
     "PlanVerificationReport",
     "PlanVerifier",
     "VerificationPolicy",
+    "description_requires_confirmation",
 ]

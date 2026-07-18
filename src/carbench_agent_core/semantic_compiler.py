@@ -24,20 +24,31 @@ from .evidence_ledger import (
     EvidenceSource,
     EvidenceStatus,
 )
-from .plan_ir import PlanIR, ResponseOutcome
+from .plan_ir import (
+    ActNode,
+    AskNode,
+    ConfirmNode,
+    ObserveNode,
+    PlanIR,
+    RespondNode,
+    ResponseOutcome,
+)
 from .plan_verifier import (
     CapabilitySnapshot,
     CapabilityEffect,
     PlanVerificationIssue,
     PlanVerifier,
     VerificationPolicy,
+    description_requires_confirmation,
 )
 
 
 SEMANTIC_COMPILER_INSTRUCTIONS = """You are an untrusted semantic compiler.
 Translate the supplied user intent into one finite receding-horizon obligation
-plan. The trusted runtime will submit only the first ready action, record the
-result as evidence, and compile a fresh horizon on the next turn.
+plan. The trusted runtime submits only the first ready action and records the
+result as evidence. Exact confirmations and successful actions advance the
+already-verified immutable suffix; Ask answers, observations, and capability
+changes are semantic replan boundaries.
 Do not execute operations and do not claim that an operation has succeeded.
 Return only JSON matching the requested schema.
 
@@ -46,11 +57,27 @@ Compilation contract:
 - Encode operation arguments in arguments_json as one strict JSON object
   string satisfying the associated live parameter schema. Never emit
   placeholders or fabricate observations.
+- Treat every required argument as a provenance obligation. Its value must be
+  unambiguously grounded in a user clause about that same operation/field, a
+  trusted schema default, or successful existing evidence. Never copy a number,
+  name, entity, target, or option from a sibling operation merely because it is
+  nearby in the conversation.
+- If an argument is absent or ambiguous, follow the trusted policy's
+  disambiguation order. When internal resolution is required, first use a live
+  read-only capability whose contract describes preferences, defaults, history,
+  or current state; otherwise ask the user. Never guess a required value.
 - Use observe only for read-only acquisition and act only for state changes.
 - Use ask when a required value is absent. Use confirm when an explicit user
   decision is an unmet precondition for a consequential state change. Every
   confirm node must list the exact downstream act node IDs it authorizes.
 - Dependencies must encode every prerequisite. Keep the graph minimal.
+- Before proposing any act, perform a fresh policy audit: identify the intended
+  operation, scan the entire trusted policy for every rule that can constrain
+  it, and encode all required observations, confirmations, ordering rules, and
+  automatic companion actions as ancestors. If a policy condition is unknown,
+  resolve it with observe or ask before act; never assume the condition is safe.
+- Re-run that full policy audit after every semantic replan boundary. Existing
+  observations are evidence, not permission to skip unrelated policy checks.
 - Assign a unique evidence key to each ask, confirm, observe, and act producer.
 - Emit exactly one terminal respond node and classify its outcome precisely:
   completed for a finished state change, answered for an informational answer,
@@ -68,10 +95,26 @@ Compilation contract:
 - Each wire node contains only fields defined for its kind. evidence_inputs may
   contain only exact keys from existing_evidence.
 
-The trusted compiler computes a monotone evidence closure: it adds every action
-success key to a completed response and every observation success key to an
-answered response. Still list the relevant keys yourself; never omit carried
-required_completion_evidence.
+The trusted compiler owns the terminal proof closure: completed responses cite
+exactly current action-success keys plus carried completion obligations, while
+answered responses include every current observation-success key. Still emit
+semantically relevant references; model-authored interaction evidence can never
+substitute for successful external action evidence.
+"""
+
+SEMANTIC_REVIEW_INSTRUCTION = """Perform an independent semantic safety review
+of the previous complete candidate against the entire trusted policy, original
+goal, current event, live capabilities, and immutable evidence. Return only one
+complete corrected JSON plan, never a verdict or explanation.
+
+Review every intended external action from scratch. Find every applicable
+policy condition, required observation, confirmation, ordering constraint,
+automatic companion action, and unavailable-capability restriction. Unknown
+conditions must be resolved before action. Audit each argument's provenance for
+the same operation and field; do not inherit a value from a sibling operation.
+Preserve the user's requested goal and values. Refuse only when the policy or
+live capability surface actually prohibits fulfillment. The returned plan is
+untrusted and will be decoded and verified again locally.
 """
 
 MAX_PROVIDER_SCHEMA_CHARS = 5_000
@@ -280,7 +323,9 @@ class CompilationRequest(BaseModel):
                     f"live capability {name!r} has an invalid parameter schema"
                 ) from exc
             requires_confirmation = (
-                name in critical or function.get("x-pact-requires-confirmation") is True
+                name in critical
+                or function.get("x-pact-requires-confirmation") is True
+                or description_requires_confirmation(description)
             )
             raw_effect = effects.get(name, function.get("x-pact-effect", "unknown"))
             if raw_effect not in {"unknown", "observe", "act"}:
@@ -520,6 +565,7 @@ class CompilationAttempt(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     attempt: int = Field(ge=1)
+    phase: Literal["proposal", "repair", "audit"] = "proposal"
     was_repair: bool
     accepted: bool
     output_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -614,9 +660,11 @@ class SemanticCompiler:
         backend: StructuredPlanBackend,
         *,
         limits: SemanticCompilerLimits | None = None,
+        semantic_review: bool = False,
     ) -> None:
         self._backend = backend
         self._limits = limits or SemanticCompilerLimits()
+        self._semantic_review = semantic_review
 
     def compile(self, request: CompilationRequest) -> CompilationResult:
         """Compile once, perform at most one repair, and never execute output."""
@@ -633,11 +681,12 @@ class SemanticCompiler:
             plan_id=request.plan_id,
             operation_names=tuple(item.name for item in request.capabilities),
         )
-        messages = [
+        base_messages = [
             {"role": "system", "content": SEMANTIC_COMPILER_INSTRUCTIONS},
             {"role": "system", "content": policy_json},
             {"role": "user", "content": payload_json},
         ]
+        messages = base_messages
         snapshot = CapabilitySnapshot.from_tools(request.as_tool_declarations())
         verifier = PlanVerifier(
             snapshot,
@@ -648,6 +697,7 @@ class SemanticCompiler:
         )
         attempts: list[CompilationAttempt] = []
         final_issues: tuple[CompilationIssue, ...] = ()
+        accepted_plan: PlanIR | None = None
 
         for attempt_index in range(self._limits.max_repair_attempts + 1):
             try:
@@ -690,6 +740,7 @@ class SemanticCompiler:
             accepted = plan is not None and not issues
             attempt = CompilationAttempt(
                 attempt=attempt_index + 1,
+                phase="repair" if attempt_index > 0 else "proposal",
                 was_repair=attempt_index > 0,
                 accepted=accepted,
                 output_sha256=_sha256(candidate.text),
@@ -703,12 +754,8 @@ class SemanticCompiler:
             )
             attempts.append(attempt)
             if accepted and plan is not None:
-                return CompilationResult(
-                    plan=plan,
-                    attempts=tuple(attempts),
-                    request_sha256=_sha256(request_json),
-                    capability_sha256=snapshot.digest,
-                )
+                accepted_plan = plan
+                break
 
             final_issues = issues
             if any(issue.code == "provider_output_truncated" for issue in issues):
@@ -726,9 +773,88 @@ class SemanticCompiler:
                     },
                 ]
 
-        raise PlanRepairExhaustedError(
+        if accepted_plan is None:
+            raise PlanRepairExhaustedError(
+                attempts=tuple(attempts),
+                issues=final_issues,
+            )
+
+        if self._semantic_review and any(
+            isinstance(node, ActNode) for node in accepted_plan.nodes
+        ):
+            review_messages = [
+                *base_messages,
+                {
+                    "role": "assistant",
+                    "content": _plan_to_wire_json(accepted_plan),
+                },
+                {"role": "user", "content": SEMANTIC_REVIEW_INSTRUCTION},
+            ]
+            try:
+                candidate = self._backend.generate(
+                    messages=review_messages,
+                    response_schema=response_schema,
+                    response_schema_name="obligation_plan",
+                )
+            except CompilerBackendError as exc:
+                if not exc.attempts:
+                    exc.attempts = tuple(attempts)
+                raise
+            except SemanticCompilationError:
+                raise
+            except Exception as exc:
+                raise CompilerBackendError(
+                    "semantic compiler backend failed during semantic review",
+                    attempts=tuple(attempts),
+                ) from exc
+
+            review_issues: tuple[CompilationIssue, ...]
+            if candidate.finish_reason == "length":
+                review_issues = (
+                    CompilationIssue(
+                        code="provider_output_truncated",
+                        message=(
+                            "The provider exhausted its output budget before "
+                            "producing a complete reviewed plan."
+                        ),
+                    ),
+                )
+                reviewed_plan = None
+            else:
+                review_issues, reviewed_plan = self._decode_and_verify(
+                    candidate.text,
+                    request=request,
+                    verifier=verifier,
+                )
+            review_accepted = reviewed_plan is not None and not review_issues
+            attempts.append(
+                CompilationAttempt(
+                    attempt=len(attempts) + 1,
+                    phase="audit",
+                    was_repair=False,
+                    accepted=review_accepted,
+                    output_sha256=_sha256(candidate.text),
+                    model=candidate.model,
+                    finish_reason=candidate.finish_reason,
+                    duration_ms=candidate.duration_ms,
+                    cost=candidate.cost,
+                    quota_wait_ms=candidate.quota_wait_ms,
+                    usage=candidate.usage,
+                    issues=review_issues,
+                )
+            )
+            if not review_accepted or reviewed_plan is None:
+                raise PlanRepairExhaustedError(
+                    attempts=tuple(attempts),
+                    issues=review_issues,
+                )
+            accepted_plan = reviewed_plan
+
+        return CompilationResult(
+            plan=accepted_plan,
             attempts=tuple(attempts),
-            issues=final_issues,
+            request_sha256=_sha256(request_json),
+            capability_sha256=snapshot.digest,
         )
 
     def _validate_request_bounds(
@@ -789,7 +915,14 @@ class SemanticCompiler:
                 strict=True,
             )
             plan = PlanIR.model_validate_json(
-                _canonical_json(_wire_to_plan_payload(wire)),
+                _canonical_json(
+                    _wire_to_plan_payload(
+                        wire,
+                        required_completion_evidence=(
+                            request.required_completion_evidence
+                        ),
+                    )
+                ),
                 strict=True,
             )
         except (ValidationError, ValueError, TypeError) as exc:
@@ -939,7 +1072,11 @@ def _wire_plan_response_schema(
     return schema
 
 
-def _wire_to_plan_payload(wire: _WirePlan) -> dict[str, Any]:
+def _wire_to_plan_payload(
+    wire: _WirePlan,
+    *,
+    required_completion_evidence: Collection[str] = (),
+) -> dict[str, Any]:
     """Convert the uniform provider envelope into the discriminated PlanIR."""
 
     if len(set(wire.evidence_inputs)) != len(wire.evidence_inputs):
@@ -994,10 +1131,31 @@ def _wire_to_plan_payload(wire: _WirePlan) -> dict[str, Any]:
             }
         )
 
-    # Do not trust the model to enumerate the evidence induced by its own
-    # graph. Closing this set locally can only add proof obligations; it never
-    # removes a requirement or fabricates evidence. PlanIR still verifies that
-    # every added key has a unique producer on the terminal path.
+    # ``authorizes`` is already an explicit model-authored semantic relation.
+    # Materialize its missing sequencing edge locally so authorization can only
+    # delay an action, never release or add one. Unknown/non-Act targets and
+    # cycles remain verifier errors.
+    node_by_id = {
+        node_payload["id"]: node_payload for node_payload in nodes
+    }
+    if len(node_by_id) == len(nodes):
+        for node_payload in nodes:
+            if node_payload["kind"] != "confirm":
+                continue
+            for target_id in node_payload["authorizes"]:
+                target = node_by_id.get(target_id)
+                if target is None or target["kind"] != "act":
+                    continue
+                target["depends_on"] = list(
+                    dict.fromkeys(
+                        [*target["depends_on"], node_payload["id"]]
+                    )
+                )
+
+    # Do not trust the model to define completion proof semantics.  The local
+    # kernel derives the exact action-success closure and carried obligations,
+    # filtering interaction or observation keys that cannot prove completion.
+    # PlanIR and PlanVerifier still verify every producer and provenance record.
     action_success_keys = [
         node["success_evidence_key"] for node in nodes if node["kind"] == "act"
     ]
@@ -1009,7 +1167,15 @@ def _wire_to_plan_payload(wire: _WirePlan) -> dict[str, Any]:
             continue
         induced: list[str] = []
         if node_payload["outcome"] == ResponseOutcome.COMPLETED.value:
-            induced = action_success_keys
+            node_payload["requires_evidence"] = list(
+                dict.fromkeys(
+                    [
+                        *action_success_keys,
+                        *sorted(required_completion_evidence),
+                    ]
+                )
+            )
+            continue
         elif node_payload["outcome"] == ResponseOutcome.ANSWERED.value:
             induced = observation_success_keys
         node_payload["requires_evidence"] = list(
@@ -1020,7 +1186,11 @@ def _wire_to_plan_payload(wire: _WirePlan) -> dict[str, Any]:
         "plan_id": wire.plan_id,
         "nodes": nodes,
     }
-    payload["evidence_inputs"] = list(wire.evidence_inputs)
+    payload["evidence_inputs"] = list(
+        dict.fromkeys(
+            [*wire.evidence_inputs, *sorted(required_completion_evidence)]
+        )
+    )
     return payload
 
 
@@ -1048,6 +1218,62 @@ def _strict_json_object(text: str) -> dict[str, Any]:
     return payload
 
 
+def _plan_to_wire_json(plan: PlanIR) -> str:
+    """Serialize a verified PlanIR back into the compact provider wire shape."""
+
+    nodes: list[dict[str, Any]] = []
+    for node in plan.nodes:
+        common = {
+            "id": node.id,
+            "kind": node.kind,
+            "depends_on": list(node.depends_on),
+        }
+        if isinstance(node, (ObserveNode, ActNode)):
+            nodes.append(
+                {
+                    **common,
+                    "operation": node.operation,
+                    "arguments_json": _canonical_json(node.arguments),
+                    "success_evidence_key": node.success_evidence_key,
+                }
+            )
+        elif isinstance(node, AskNode):
+            nodes.append(
+                {
+                    **common,
+                    "prompt": node.prompt,
+                    "evidence_key": node.evidence_key,
+                }
+            )
+        elif isinstance(node, ConfirmNode):
+            nodes.append(
+                {
+                    **common,
+                    "prompt": node.prompt,
+                    "evidence_key": node.evidence_key,
+                    "authorizes": list(node.authorizes),
+                }
+            )
+        elif isinstance(node, RespondNode):
+            nodes.append(
+                {
+                    **common,
+                    "text": node.text,
+                    "outcome": node.outcome.value,
+                    "requires_evidence": list(node.requires_evidence),
+                }
+            )
+        else:  # pragma: no cover - PlanIR is a closed discriminated union
+            raise TypeError(f"unsupported plan node: {type(node).__name__}")
+    return _canonical_json(
+        {
+            "plan_id": plan.plan_id,
+            "evidence_inputs": list(plan.evidence_inputs),
+            "nodes": nodes,
+        }
+    )
+
+
 def _issues_from_validation_error(
     error: ValidationError | ValueError | TypeError,
 ) -> tuple[CompilationIssue, ...]:
@@ -1063,9 +1289,31 @@ def _issues_from_validation_error(
         issue_type = str(detail.get("type") or "validation_error")
         location = tuple(detail.get("loc") or ())
         message = str(detail.get("msg") or "Satisfy the PlanIR contract.")
+        normalized_message = message.casefold()
+        invariant_code = next(
+            (
+                code
+                for fragment, code in (
+                    (
+                        "must depend on confirmation",
+                        "confirmation_dependency_missing",
+                    ),
+                    ("every plan node must lead", "node_not_terminal_ancestor"),
+                    ("response must be terminal", "response_not_terminal"),
+                    ("must form an acyclic graph", "dependency_cycle"),
+                    ("must contain exactly one response", "response_count"),
+                )
+                if fragment in normalized_message
+            ),
+            None,
+        )
         issues.append(
             CompilationIssue(
-                code=f"invalid_plan:{issue_type}",
+                code=(
+                    f"invalid_plan:{invariant_code}"
+                    if invariant_code is not None
+                    else f"invalid_plan:{issue_type}"
+                ),
                 path=location,
                 message=message,
             )
@@ -1143,6 +1391,7 @@ __all__ = [
     "ModelCandidate",
     "PlanRepairExhaustedError",
     "SEMANTIC_COMPILER_INSTRUCTIONS",
+    "SEMANTIC_REVIEW_INSTRUCTION",
     "SemanticCompilationError",
     "SemanticCompiler",
     "SemanticCompilerLimits",

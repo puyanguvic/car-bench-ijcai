@@ -21,10 +21,14 @@ from carbench_agent_core.semantic_compiler import (
     ModelCandidate,
     PlanRepairExhaustedError,
     SEMANTIC_COMPILER_INSTRUCTIONS,
+    SEMANTIC_REVIEW_INSTRUCTION,
     SemanticCompiler,
     SemanticCompilerLimits,
 )
-from track_2_agent_under_test_cerebras.cerebras_client import TokenUsage
+from track_2_agent_under_test_cerebras.cerebras_client import (
+    DEFAULT_CEREBRAS_API_BASE,
+    TokenUsage,
+)
 from track_2_agent_under_test_cerebras.plan_compiler_backend import (
     CerebrasCompilerSettings,
     CerebrasStructuredPlanBackend,
@@ -38,12 +42,13 @@ def capability(
     *,
     properties: dict[str, Any] | None = None,
     required: list[str] | None = None,
+    description: str = "Access a synthetic resource.",
 ) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
             "name": name,
-            "description": "Access a synthetic resource.",
+            "description": description,
             "x-pact-effect": "act",
             "parameters": {
                 "type": "object",
@@ -263,8 +268,8 @@ def test_compiler_monotonically_closes_completed_action_evidence() -> None:
 
     assert len(backend.calls) == 1
     assert result.plan.terminal.requires_evidence == (
-        "resource.updated",
         "prerequisite.updated",
+        "resource.updated",
     )
 
 
@@ -314,6 +319,190 @@ def test_compiler_performs_exactly_one_structured_repair() -> None:
     repair = json.loads(backend.calls[1]["messages"][-1]["content"])
     assert repair["verification_issues"][0]["code"] == ("operation_unavailable")
     assert "invented_operation" not in repair["verification_issues"][0]["message"]
+
+
+def test_action_plan_receives_one_fresh_semantic_review() -> None:
+    backend = SequenceBackend(
+        [
+            ModelCandidate(text=plan_json(arguments={"resource_id": "draft"})),
+            ModelCandidate(text=plan_json(arguments={"resource_id": "reviewed"})),
+        ]
+    )
+
+    result = SemanticCompiler(backend, semantic_review=True).compile(request())
+
+    assert len(backend.calls) == 2
+    assert [attempt.accepted for attempt in result.attempts] == [True, True]
+    assert [attempt.was_repair for attempt in result.attempts] == [False, False]
+    assert result.plan.node_by_id["apply"].arguments == {
+        "resource_id": "reviewed"
+    }
+    assert backend.calls[1]["messages"][-1] == {
+        "role": "user",
+        "content": SEMANTIC_REVIEW_INSTRUCTION,
+    }
+    reviewed_input = json.loads(backend.calls[1]["messages"][-2]["content"])
+    assert reviewed_input["plan_id"] == "request-1"
+    assert json.loads(reviewed_input["nodes"][0]["arguments_json"]) == {
+        "resource_id": "draft"
+    }
+
+
+def test_failed_semantic_review_fails_closed_instead_of_using_draft() -> None:
+    backend = SequenceBackend(
+        [
+            ModelCandidate(text=plan_json()),
+            ModelCandidate(text=plan_json(operation="invented_operation")),
+        ]
+    )
+
+    with pytest.raises(PlanRepairExhaustedError) as captured:
+        SemanticCompiler(backend, semantic_review=True).compile(request())
+
+    assert len(backend.calls) == 2
+    assert [attempt.accepted for attempt in captured.value.attempts] == [True, False]
+    assert {issue.code for issue in captured.value.issues} == {
+        "operation_unavailable"
+    }
+
+
+def test_truncated_semantic_review_fails_closed_and_preserves_all_usage() -> None:
+    backend = SequenceBackend(
+        [
+            ModelCandidate(
+                text=plan_json(),
+                usage=CompilerTokenUsage(
+                    prompt_tokens=10,
+                    completion_tokens=4,
+                    thinking_tokens=3,
+                ),
+            ),
+            ModelCandidate(
+                text="",
+                finish_reason="length",
+                usage=CompilerTokenUsage(
+                    prompt_tokens=12,
+                    completion_tokens=6,
+                    thinking_tokens=5,
+                ),
+            ),
+        ]
+    )
+
+    with pytest.raises(PlanRepairExhaustedError) as captured:
+        SemanticCompiler(backend, semantic_review=True).compile(request())
+
+    assert [item.phase for item in captured.value.attempts] == [
+        "proposal",
+        "audit",
+    ]
+    assert captured.value.issues[0].code == "provider_output_truncated"
+    assert captured.value.usage == CompilerTokenUsage(
+        prompt_tokens=22,
+        completion_tokens=10,
+        thinking_tokens=8,
+    )
+
+
+def test_semantic_review_backend_failure_preserves_proposal_usage() -> None:
+    backend = SequenceBackend(
+        [
+            ModelCandidate(
+                text=plan_json(),
+                cost=0.2,
+                quota_wait_ms=15,
+                usage=CompilerTokenUsage(
+                    prompt_tokens=9,
+                    completion_tokens=4,
+                    thinking_tokens=2,
+                ),
+            ),
+            RuntimeError("review provider unavailable"),
+        ]
+    )
+
+    with pytest.raises(CompilerBackendError) as captured:
+        SemanticCompiler(backend, semantic_review=True).compile(request())
+
+    assert len(backend.calls) == 2
+    assert [item.phase for item in captured.value.attempts] == ["proposal"]
+    assert captured.value.cost == 0.2
+    assert captured.value.quota_wait_ms == 15
+    assert captured.value.usage == CompilerTokenUsage(
+        prompt_tokens=9,
+        completion_tokens=4,
+        thinking_tokens=2,
+    )
+
+
+def test_structural_repair_then_semantic_review_uses_at_most_three_calls() -> None:
+    backend = SequenceBackend(
+        [
+            ModelCandidate(text=plan_json(operation="invented_operation")),
+            ModelCandidate(text=plan_json(arguments={"resource_id": "repaired"})),
+            ModelCandidate(text=plan_json(arguments={"resource_id": "reviewed"})),
+        ]
+    )
+
+    result = SemanticCompiler(backend, semantic_review=True).compile(request())
+
+    assert len(backend.calls) == 3
+    assert [attempt.was_repair for attempt in result.attempts] == [False, True, False]
+    assert result.plan.node_by_id["apply"].arguments == {
+        "resource_id": "reviewed"
+    }
+
+
+def test_non_action_plan_does_not_spend_semantic_review_call() -> None:
+    backend = SequenceBackend(
+        [
+            ModelCandidate(
+                text=response_plan_json(
+                    outcome="answered",
+                    text="Here is the requested information.",
+                )
+            )
+        ]
+    )
+
+    result = SemanticCompiler(backend, semantic_review=True).compile(request())
+
+    assert len(backend.calls) == 1
+    assert result.plan.terminal.outcome.value == "answered"
+
+
+def test_completed_proof_closure_filters_non_action_model_references() -> None:
+    candidate = plan_json(
+        requires_evidence=["interaction.confirmed", "resource.updated"]
+    )
+
+    result = SemanticCompiler(SequenceBackend([ModelCandidate(text=candidate)])).compile(
+        request()
+    )
+
+    assert result.plan.terminal.requires_evidence == ("resource.updated",)
+
+
+def test_compiler_materializes_explicit_confirmation_authorization_edge() -> None:
+    payload = json.loads(plan_json())
+    payload["nodes"].insert(
+        0,
+        {
+            "id": "authorize",
+            "kind": "confirm",
+            "depends_on": [],
+            "prompt": "Proceed with the exact update?",
+            "evidence_key": "resource.authorized",
+            "authorizes": ["apply"],
+        },
+    )
+    payload["nodes"][1]["depends_on"] = []
+
+    result = SemanticCompiler(
+        SequenceBackend([ModelCandidate(text=json.dumps(payload))])
+    ).compile(request())
+
+    assert result.plan.node_by_id["apply"].depends_on == ("authorize",)
 
 
 def test_compiler_stops_after_one_failed_repair() -> None:
@@ -521,14 +710,15 @@ def test_compiler_preserves_carried_completion_evidence_obligations() -> None:
         "prior.success",
     )
 
-    with pytest.raises(PlanRepairExhaustedError) as captured:
-        SemanticCompiler(
-            SequenceBackend([ModelCandidate(text=plan_json())]),
-            limits=SemanticCompilerLimits(max_repair_attempts=0),
-        ).compile(compile_request)
-    assert "required_completion_evidence_missing" in {
-        issue.code for issue in captured.value.issues
-    }
+    locally_closed = SemanticCompiler(
+        SequenceBackend([ModelCandidate(text=plan_json())]),
+        limits=SemanticCompilerLimits(max_repair_attempts=0),
+    ).compile(compile_request)
+    assert locally_closed.plan.evidence_inputs == ("prior.success",)
+    assert locally_closed.plan.terminal.requires_evidence == (
+        "resource.updated",
+        "prior.success",
+    )
 
 
 def test_compiler_cannot_relabel_carried_action_obligation_as_answered() -> None:
@@ -764,7 +954,10 @@ def test_system_contract_is_domain_independent_and_receding_horizon() -> None:
     normalized = SEMANTIC_COMPILER_INSTRUCTIONS.lower()
 
     assert "only the first ready action" in normalized
-    assert "compile a fresh horizon" in normalized
+    assert "already-verified immutable suffix" in normalized
+    assert "semantic replan boundaries" in normalized
+    assert "provenance obligation" in normalized
+    assert "never copy a number" in normalized
     assert "external failure" in normalized
     for outcome in ("completed", "answered", "refused", "declined", "fail_safe"):
         assert outcome in normalized
@@ -772,12 +965,50 @@ def test_system_contract_is_domain_independent_and_receding_horizon() -> None:
         assert forbidden not in normalized
 
 
+def test_compile_request_projects_anchored_confirmation_marker_as_contract() -> None:
+    compile_request = CompilationRequest.from_live_tools(
+        plan_id="request-1",
+        trusted_policy="Honor live capability contracts.",
+        goal="Apply a synthetic update.",
+        tools=[
+            capability(
+                description="REQUIRES_CONFIRMATION: apply a synthetic update."
+            )
+        ],
+    )
+
+    projected = compile_request.capabilities[0]
+    assert projected.requires_confirmation is True
+    assert projected.effect == "act"
+
+
 def compiler_settings() -> CerebrasCompilerSettings:
     return CerebrasCompilerSettings.from_env({})
 
 
-def test_cerebras_compiler_default_preserves_budget_for_structured_output() -> None:
-    assert compiler_settings().reasoning_effort == "low"
+def test_cerebras_compiler_defaults_reserve_reasoning_and_review_budget() -> None:
+    settings = compiler_settings()
+
+    assert settings.reasoning_effort == "medium"
+    assert settings.max_completion_tokens == 8192
+    assert settings.semantic_review is True
+
+
+def test_archived_planner_environment_cannot_override_pact_defaults() -> None:
+    settings = CerebrasCompilerSettings.from_env(
+        {
+            "TRACK2_PLANNER_MODEL": "archived-model",
+            "TRACK2_PLANNER_REASONING_EFFORT": "high",
+            "TRACK2_PLANNER_MAX_COMPLETION_TOKENS": "1",
+            "TRACK2_CEREBRAS_API_BASE": "https://archived.invalid",
+        }
+    )
+
+    assert settings.model == "gpt-oss-120b"
+    assert settings.reasoning_effort == "medium"
+    assert settings.max_completion_tokens == 8192
+    assert settings.semantic_review is True
+    assert settings.api_base == DEFAULT_CEREBRAS_API_BASE
 
 
 def test_cerebras_compiler_settings_are_fully_environment_configurable() -> None:
@@ -789,6 +1020,7 @@ def test_cerebras_compiler_settings_are_fully_environment_configurable() -> None
             "PACT_COMPILER_MAX_COMPLETION_TOKENS": "2048",
             "PACT_COMPILER_TEMPERATURE": "0.25",
             "PACT_COMPILER_REASONING_EFFORT": "medium",
+            "PACT_COMPILER_SEMANTIC_REVIEW": "false",
             "PACT_COMPILER_MAX_REPAIR_ATTEMPTS": "0",
             "PACT_COMPILER_MAX_NODES": "7",
             "PACT_COMPILER_MAX_DEPENDENCY_DEPTH": "6",
@@ -810,6 +1042,7 @@ def test_cerebras_compiler_settings_are_fully_environment_configurable() -> None
         max_completion_tokens=2048,
         temperature=0.25,
         reasoning_effort="medium",
+        semantic_review=False,
         max_repair_attempts=0,
         max_nodes=7,
         max_dependency_depth=6,
@@ -830,6 +1063,7 @@ def test_cerebras_compiler_settings_are_fully_environment_configurable() -> None
         ("PACT_COMPILER_MAX_COMPLETION_TOKENS", "0"),
         ("PACT_COMPILER_TEMPERATURE", "3.0"),
         ("PACT_COMPILER_REASONING_EFFORT", "extreme"),
+        ("PACT_COMPILER_SEMANTIC_REVIEW", "sometimes"),
         ("PACT_COMPILER_MAX_REPAIR_ATTEMPTS", "2"),
         ("PACT_COMPILER_MAX_NODES", "not-an-int"),
     ],
@@ -911,7 +1145,7 @@ def test_cerebras_backend_passes_only_environment_settings_to_sdk_client() -> No
     ]
     assert candidate.usage == CompilerTokenUsage(
         prompt_tokens=40,
-        completion_tokens=12,
+        completion_tokens=7,
         thinking_tokens=5,
     )
     assert candidate.cost == 0.03

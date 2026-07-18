@@ -83,6 +83,8 @@ def validate_submission(data: dict, *, digest: str) -> None:
         "PACT_COMPILER_MODEL",
         "PACT_COMPILER_CEREBRAS_API_BASE",
         "PACT_COMPILER_REASONING_EFFORT",
+        "PACT_COMPILER_MAX_COMPLETION_TOKENS",
+        "PACT_COMPILER_SEMANTIC_REVIEW",
     }
     missing = sorted(required_agent_env.difference(agent_env))
     if missing:

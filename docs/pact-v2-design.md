@@ -1,8 +1,10 @@
-# PACT V2: contract-verified receding-horizon obligations
+# PACT: contract-verified receding-horizon obligations
 
 Status: final Track 2 submission architecture. The production server imports
 `PACTAgentExecutor`; the release Dockerfile copies only the PACT runtime
-dependency closure. This document describes that reachable path.
+dependency closure. "V2" is only the historical design-iteration label in this
+file name: there is one submitted PACT agent and no V1 compatibility path in
+the release image.
 
 ## 1. Design objective
 
@@ -13,18 +15,20 @@ PACT separates semantic interpretation from execution authority:
 - A deterministic local boundary performs strict decoding, PlanIR validation,
   complete live JSON Schema validation, evidence checks, and bounded execution.
 - The A2A adapter exposes at most one outstanding external operation and lets
-  only evaluator-returned results enter the evidence ledger.
+  only a correlated evaluator-returned success create external evidence. Ask
+  and Confirm replies are separately typed as input evidence.
 
-The implementation is domain-independent. The PACT kernel contains no
-CAR-bench task IDs, public utterances, or automotive workflow branches. Domain
-semantics enter through the trusted policy envelope, current user event, live
-tool declarations, and returned evidence.
+The implementation is domain-independent. The reachable PACT kernel contains
+no benchmark task IDs, memorized public utterances, operation-name allowlists,
+or domain workflow branches. Task semantics enter only through the trusted
+policy envelope, current user event, live capability contracts, and returned
+evidence.
 
 PACT does **not** prove that an LLM understood a natural-language policy or tool
 description. Its unconditional checks begin at strict wire decoding and cover
 typed structure, live capability contracts, local state transitions, and
 evidence provenance. Effect and confirmation claims are conditional on trusted
-machine-readable metadata when that metadata exists.
+capability metadata or the narrowly parsed contract marker when either exists.
 
 ## 2. Reachable production components
 
@@ -34,15 +38,16 @@ machine-readable metadata when that metadata exists.
 | Protocol adapter | `track_2_agent_under_test_cerebras/pact_agent.py` | Context isolation, A2A parsing/rendering, single-result correlation, receding horizons, metrics |
 | Cerebras backend | `track_2_agent_under_test_cerebras/plan_compiler_backend.py` | Environment-configured structured completion and trusted local limits |
 | Provider client | `track_2_agent_under_test_cerebras/cerebras_client.py` | Cerebras SDK call, proactive pacing, bounded 429 retry/wait, usage extraction |
-| Semantic compiler | `carbench_agent_core/semantic_compiler.py` | Strict compact wire schema, local decode, one bounded repair |
+| Semantic compiler | `carbench_agent_core/semantic_compiler.py` | Strict compact wire schema, local decode, one bounded repair, independent action audit |
 | Typed IR | `carbench_agent_core/plan_ir.py` | Frozen obligation DAG and typed terminal outcomes |
 | Static verifier | `carbench_agent_core/plan_verifier.py` | Live capability snapshot, resource/safety/evidence checks |
 | Runtime | `carbench_agent_core/obligation_runtime.py` | Exactly-one pending action and deterministic node transitions |
 | Evidence ledger | `carbench_agent_core/evidence_ledger.py` | Append-only, replay-aware, provenance-preserving evidence |
 | Schema guard | `carbench_agent_core/tool_index.py` | Draft 2020-12 argument validation and structured issues |
 
-The final image intentionally omits the legacy rule controller and legacy
-Track 2 executor.
+The source checkout retains older controller and planner/executor code only as
+archived comparison material. The final Dockerfile neither copies nor imports
+those modules, and the submission workflow has no alternate legacy target.
 
 ## 3. Trust and threat model
 
@@ -61,7 +66,8 @@ The following remain untrusted until locally checked:
 - model-generated wire JSON and every operation argument;
 - user text, including text that resembles a system envelope after context
   initialization;
-- tool descriptions as natural-language semantic claims;
+- free-form tool-description semantics, except the explicitly anchored trusted
+  `REQUIRES_CONFIRMATION` contract marker described in Section 7;
 - malformed, duplicate, stale, or out-of-order result envelopes; and
 - nested mutable values supplied to Pydantic models.
 
@@ -104,11 +110,15 @@ C_theta(P, g, H, T, view(E), O) -> WirePlan
 The local acceptance pipeline is a partial function:
 
 ```text
-decode_strict(WirePlan)
+proposal
+  -> decode_strict(WirePlan)
   -> compact wire model
   -> frozen PlanIR
   -> verify(PlanIR, snapshot(T), E, O)
-  -> AcceptedPlan | typed rejection issues
+  -> accepted proposal
+     | value-redacted rejection -> [one repair -> decode -> verify]
+  -> [if accepted plan has Act: independent audit -> decode -> verify]
+  -> AcceptedPlan | typed rejection
 ```
 
 The deterministic kernel advances one node:
@@ -133,6 +143,13 @@ The compiler is explicitly instructed not to execute operations or claim that
 an external operation succeeded. Existing evidence includes source, status,
 event/call/node provenance, operation and digest fields, and exact
 authorizations rather than a prose-only summary.
+
+For an accepted proposal containing an Act, a separate review prompt asks the
+model to reconstruct the complete plan after independently auditing the entire
+trusted policy, action prerequisites, argument provenance, ordering, and
+capability availability. This is a stochastic semantic cross-check, not a
+formal proof. Its returned plan crosses the same untrusted boundary as the
+proposal.
 
 ### 5.2 Cerebras-compatible compact wire schema
 
@@ -168,7 +185,7 @@ top level, wrong variant fields, non-object `arguments_json`, and any candidate
 over the configured byte/character bound. The decoded argument object then
 passes through the full live Draft 2020-12 schema.
 
-### 5.3 Bounded repair
+### 5.3 Bounded proposal, repair, and action audit
 
 The initial candidate is decoded and verified locally. On rejection, the
 compiler may receive one repair request containing:
@@ -181,11 +198,25 @@ compiler may receive one repair request containing:
 raises `PlanRepairExhaustedError`; it is never executed. Attempt records retain
 hashes and metrics, not raw model output.
 
-Provider termination is classified before repair. A `finish_reason=length`
-response is a typed `provider_output_truncated` failure: its usage is retained,
-but a repair call is skipped because the provider has not supplied a complete
-candidate to correct. Empty content is likewise represented as a typed invalid
-candidate and can never enter `PlanIR` or the runtime.
+With the submitted `PACT_COMPILER_SEMANTIC_REVIEW=true`, an accepted plan that
+contains at least one Act receives exactly one additional action-audit call.
+The audit sees the fixed compilation contract, trusted policy, original input
+payload, and a canonical rendering of the accepted plan; it must return one
+complete replacement plan. That replacement is strictly decoded and fully
+verified again. An invalid, truncated, or unavailable audit fails closed: PACT
+does not fall back to executing the pre-audit candidate.
+
+Consequently one compilation has at most three successful model completions:
+proposal, optional verification-guided repair, and action audit. Plans without
+an Act skip the audit. The repair and audit are different controls: repair
+addresses a locally identified structural/contract rejection, whereas audit
+re-examines semantic coverage from scratch.
+
+Provider termination is classified before repair or audit acceptance. A
+`finish_reason=length` response is a typed `provider_output_truncated` failure:
+its usage is retained, but a proposal-side repair call is skipped because the
+provider supplied no complete candidate to correct. Empty content is likewise
+a typed invalid candidate and can never enter `PlanIR` or the runtime.
 
 ## 6. Typed PlanIR
 
@@ -200,7 +231,9 @@ candidate and can never enter `PlanIR` or the runtime.
 All variants forbid extra fields. Arguments are JSON constants; the IR has no
 callbacks, template evaluator, arbitrary expressions, imports, regular
 expressions generated as code, or evidence-binding language. Dynamic values
-are resolved by compiling a fresh horizon after relevant evidence arrives.
+are resolved at semantic data boundaries by compiling a fresh horizon after
+relevant evidence arrives; the runtime never evaluates model-generated
+expressions.
 
 ### Structural conditions
 
@@ -219,11 +252,17 @@ PlanIR construction rejects:
 The verifier additionally enforces configured node and dependency-depth bounds.
 The production defaults are 20 nodes and depth 12.
 
+During wire lowering, an explicit model-authored `Confirm.authorizes` relation
+also induces the missing Confirm-to-Act sequencing edge, if needed. This only
+strengthens ordering for a target the model already declared; it never invents
+an operation, argument, confirmation target, or permission. Unknown targets,
+non-Act targets, and cycles remain verifier errors.
+
 ### Typed terminal outcomes
 
 | Outcome | Structural/evidence condition |
 |---|---|
-| `completed` | Has a current action or carried evidence; cites every action success key and all outstanding prior-action keys; emitted citations are successful external evidence |
+| `completed` | Has a current action or carried action evidence; its evidence list is locally replaced by the exact current-plus-carried action-success closure, and every cited record must be successful external Act evidence |
 | `answered` | Contains no action and cites all observation results used in the horizon; cited evidence cannot be failed |
 | `refused` | Contains no external operation |
 | `declined` | Contains no action and requires an available false confirmation record |
@@ -253,7 +292,17 @@ combinators, and `additionalProperties` according to the supplied schema.
 No operation is classified from its name. The trusted metadata surface is:
 
 - `x-pact-effect = "observe" | "act" | "unknown"`; and
-- `x-pact-requires-confirmation = true`.
+- `x-pact-requires-confirmation = true`; or
+- an anchored `REQUIRES_CONFIRMATION` marker at the beginning of the trusted
+  function description (allowing leading whitespace and a delimiter after the
+  marker).
+
+The description marker is a contract adapter for the evaluator-provided live
+function declaration. A mention in the middle of a description, a longer
+identifier sharing the prefix, user text, and model output do not activate it.
+The original description plus the derived confirmation/effect fields are part
+of the normalized capability digest, so a marker change invalidates an
+accepted horizon.
 
 A confirmation-required capability is forced to effect `act`. Conflicting or
 invalid metadata fails closed. If effect is `unknown`, schema and membership
@@ -325,24 +374,50 @@ Explicit `FAILURE` creates `<success_key>.failure` evidence, marks the node
 failed, and blocks the plan. Malformed or status-less result envelopes are
 rejected by the adapter and cause safe termination rather than success.
 
-## 9. Receding horizons and outstanding actions
+## 9. Control events, data events, and receding horizons
 
-PACT avoids a model-generated expression language by replanning after evidence
-becomes available:
+PACT separates events that release an already verified transition from events
+that introduce new semantic data:
 
-- Ask response -> record input -> compile a fresh horizon;
-- positive confirmation -> record scoped authorization -> fresh horizon;
-- observation result -> record external success -> fresh horizon;
-- successful action -> record success and advance a still-valid accepted graph;
-  if a later observation or user interaction occurs, subsequent compilation
-  sees that action evidence.
+- **Control events:** an exact positive confirmation and a successful Act
+  result advance the same immutable accepted PlanIR suffix. They do not ask the
+  stochastic compiler to reconstruct an authorization or an already verified
+  next action.
+- **Data events:** an Ask answer and a successful Observe result enter the
+  ledger and compile a fresh horizon because later arguments or policy choices
+  may depend on their content.
+- **Contract events:** a live capability digest change detected while
+  releasing a pending confirmation abandons the old horizon and recompiles.
+  A mismatch detected immediately before external-call emission rejects the
+  call and terminates safely. No action is released against a changed schema.
+- **Scope revisions:** a qualified positive reply that changes an operation,
+  argument, or value is a new semantic request. PACT discards the old horizon
+  without creating authorization evidence and recompiles.
+
+Negative confirmation is a control event that terminates as `declined` without
+recompiling; if an earlier action in the same request already succeeded, the
+adapter explicitly reports partial completion before acknowledging that the
+remaining action will not proceed. Ambiguous confirmation text elicits an
+explicit yes/no retry. This split is monotone: control events can only advance
+or stop an accepted graph, while all new decision-bearing data crosses the
+compiler and verifier boundary.
 
 Every successful Act adds its success key to
 `required_completion_evidence`. The compiler receives that set, and the
-verifier requires a later `completed` terminal to cite every member. A carried
-key is valid only if the ledger identifies it as a successful external action
-record. If later work fails, the adapter reports partial failure rather than
-forgetting that an effect already occurred.
+trusted wire-lowering step replaces a `completed` response's model-authored
+evidence list with exactly:
+
+```text
+{success key of every Act in the current PlanIR}
+union required_completion_evidence
+```
+
+The verifier then requires every member to resolve to successful external Act
+evidence. Ask, Confirm, Observe, input-only, failed, and missing records cannot
+enter this completion proof. If later work fails, the adapter reports partial
+failure rather than forgetting that an effect already occurred. For an
+`answered` response, lowering additionally includes all current observation
+success keys, but those keys never prove `completed`.
 
 ## 10. Scoped one-shot confirmation
 
@@ -361,12 +436,16 @@ different operation, different arguments, changed schema, or a second use.
 
 Confirmation parsing is deliberately narrow. Unambiguous positive/negative
 phrases become booleans; mixed or ambiguous text produces a yes/no retry rather
-than an action. A negative decision is recorded as failure-status input and
-terminates with a non-completion acknowledgement.
+than an action. An exact positive decision releases the verified suffix only
+while the capability digest is unchanged. A qualified positive decision that
+revises scope is replanned without applying the old authorization. A negative
+decision is recorded as failure-status input and terminates with a
+non-completion acknowledgement.
 
 This guarantee applies only when a live capability is explicitly marked
-confirmation-required. PACT does not infer consequentiality from an operation
-name or natural-language description.
+confirmation-required through the anchored trusted-description marker or the
+explicit capability extension. PACT does not infer consequentiality from an
+operation name, user message, or unconstrained prose semantics.
 
 ## 11. A2A correlation boundary
 
@@ -393,10 +472,16 @@ this distinction.
 Each semantic compilation performs:
 
 ```text
-1 initial completion + at most 1 verification-guided repair
+1 proposal + at most 1 verification-guided repair
+           + at most 1 independent action audit
 ```
 
-Therefore successful semantic completions per compile request are at most two.
+Therefore successful semantic completions per compile request are at most
+three, below the Track 2 limit of five. The action audit occurs only when the
+accepted proposal contains an Act and semantic review is enabled. Every audit
+candidate is decoded and verified from scratch; audit failure never authorizes
+the earlier proposal.
+
 The following independent limits are enforced locally and configurable:
 
 - policy, goal, current-event, conversation, and total context characters;
@@ -414,15 +499,19 @@ Provider rate-limit retry is a separate bounded loop. The Cerebras client has:
 - `CerebrasRateLimitBudgetExceededError` when the next retry or wait would
   exceed a configured budget.
 
-No provider path waits or retries indefinitely.
+No provider path waits or retries indefinitely. Rate-limit retries are
+transport recovery for a completion that did not succeed; they do not create
+or accept additional semantic candidates.
 
-The submitted Track 2 defaults are `gpt-oss-120b`, low reasoning effort, and a
-4,096-token completion ceiling. These are environment-configurable, but the
-low setting is deliberate. A high-reasoning canary consumed 12,861 prompt,
-4,096 completion, and 4,093 thinking tokens before returning
-`finish_reason=length` with no content. The production classifier now records
-that failure and its usage without spending the single repair allowance on a
-known-truncated response.
+The submitted defaults are `gpt-oss-120b`, `medium` reasoning effort, an
+8,192-token completion ceiling, and semantic review enabled. The corresponding
+environment variables are `PACT_COMPILER_MODEL`,
+`PACT_COMPILER_REASONING_EFFORT`,
+`PACT_COMPILER_MAX_COMPLETION_TOKENS`, and
+`PACT_COMPILER_SEMANTIC_REVIEW`. All provider routes and inference controls
+remain environment-configurable. Archived `TRACK2_PLANNER_*` and
+`TRACK2_EXECUTOR_*` variables are not compatibility aliases for PACT and cannot
+silently change the submitted runtime.
 
 ## 13. A2A metrics
 
@@ -442,9 +531,19 @@ Reported fields include:
 - `quota_wait_time_ms`;
 - model and provider-reported cost.
 
-Compiler rejection and repair attempts retain their usage. If a typed compiler
-error exposes completed attempts, the safe terminal response reports those
-metrics before the context accumulator resets.
+The three token counters are disjoint. Cerebras reports reasoning tokens inside
+its provider `output_tokens`; PACT maps them to A2A as:
+
+```text
+prompt_tokens     = input_tokens
+thinking_tokens   = reasoning_output_tokens
+completion_tokens = max(0, output_tokens - reasoning_output_tokens)
+```
+
+Thus evaluator aggregation does not double-count reasoning. Proposal, rejected
+repair, and action-audit attempts all retain their disjoint usage. If a typed
+compiler error exposes completed attempts, the safe terminal response reports
+those metrics before the context accumulator resets.
 
 ## 14. Enforced invariants
 
@@ -476,8 +575,10 @@ node.
 
 ### I5. Grounded completion
 
-A typed `completed` response cites successful external evidence for every
-current Act and every carried successful-action obligation. Input-only,
+Before PlanIR construction, a typed `completed` response's evidence list is
+replaced by the exact union of every current Act success key and every carried
+successful-action obligation. The verifier accepts those keys only as
+successful external Act evidence. Input-only, confirmation, observation,
 failure, or missing evidence cannot discharge completion.
 
 ### I6. Conditional scoped confirmation
@@ -489,13 +590,15 @@ matching schema digest, operation, and argument digest.
 ### I7. Context isolation
 
 Policy, goal, tools, ledger, runtime, obligations, authorization consumption,
-and metrics are keyed by A2A `context_id`; cancellation removes state and its
-lock together.
+and metrics are keyed by A2A `context_id`; cancellation removes the context
+state while retaining its stable lock object so a concurrent turn cannot enter
+through a replacement lock.
 
 ### I8. Bounded semantic inference
 
-One compile request has at most two successful completion calls. Provider
-rate-limit retries and cumulative wait are separately finite.
+One compile request has at most three successful completion calls: proposal,
+optional repair, and optional action audit. Provider rate-limit retries and
+cumulative wait are separately finite.
 
 ## 15. Failure policy
 
@@ -506,6 +609,7 @@ PACT fails closed at each boundary:
 | Invalid/missing policy event or empty goal | Generic safe text |
 | Invalid/removed capability or schema | No call; safe text |
 | Invalid wire/PlanIR | One bounded repair, then safe text |
+| Invalid/truncated/unavailable action audit | Do not execute the pre-audit plan; safe text |
 | Provider/configuration/rate-limit budget error | Safe text with available attempt metrics |
 | Malformed/multiple/unmatched tool result | No success evidence; safe text |
 | Explicit tool failure | Failure evidence; no completion claim |
@@ -518,39 +622,21 @@ provider exception data.
 
 ## 16. Reproducible engineering evidence
 
-At the report freeze on 17 July 2026:
+Release evidence is taken only from the final PACT configuration and exact
+candidate image. Deterministic coverage exercises graph
+cycles/limits/reachability, strict wire shape and size, repair and audit
+failure, nested Draft 2020-12 constraints, description-marker parsing,
+capability revocation, deep mutation, external failure,
+replay/conflict/out-of-order events, confirmation scope and one-shot
+consumption, exact completion closure, control/data event transitions, context
+isolation, disjoint token metrics, and finite rate-limit budgets. Generic
+synthetic capability contracts exercise the same reachable kernel without
+task-name or domain-workflow branches.
 
-- `uv run pytest -q` passed 330 tests plus three subtests;
-- 168 collected tests directly covered PlanIR, verifier, semantic compiler,
-  evidence ledger, obligation runtime, PACT A2A adapter, ToolIndex, and bounded
-  Cerebras retry behavior; and
-- the only warnings came from vendored evaluator Pydantic deprecations.
-
-Focused coverage includes graph cycles/limits/reachability, strict wire-schema
-size and shape, one-repair exhaustion, complete nested JSON Schema constraints,
-schema revocation, deep mutation, external failure, replay/conflict/order,
-wrong operation/digests, confirmation scope and consumption, carried completion
-obligations, context isolation/cancellation, safe-error metrics, and finite
-rate-limit budgets. Generic non-automotive tool schemas exercise the same
-kernel.
-
-These are deterministic engineering tests. They are not a CAR-bench reward,
-hidden-set estimate, or three-trial consistency result. Earlier workflow-agent
-scores are not evidence for PACT V2 and are intentionally excluded from the V2
-technical report.
-
-One public-train `base_0` smoke run exercised the complete A2A loop with the
-submitted low-reasoning default. It obtained reward 1.0, with
-`r_actions`, `r_tool_subset`, `r_tool_execution`, `r_policy`, and
-`r_user_end_conversation` each equal to 1.0. The three-user-turn trace performed
-a state lookup, confirmed and executed the shade action, obtained weather,
-confirmed the rain-dependent action, set the sunroof to 50%, and completed from
-recorded evidence. Seven compiler completion calls (including local repair)
-reported 97,922 prompt, 3,972 completion, and 2,032 thinking tokens, for 103,926
-total tokens; quota pacing accounted for 360,753.4 ms. Every observed provider
-response ended with `finish_reason=stop`, and the run had no missing-tool,
-execution, or policy error. This is a single end-to-end closure check, not a
-performance estimate or evidence about the hidden set.
+Test counts, image digests, and public-run measurements belong in the release
+record and technical report only after the final commands complete. Historical
+legacy-agent results and pre-audit PACT runs are not evidence for the submitted
+configuration. No hidden-set result is claimed.
 
 ## 17. Release checklist
 
@@ -580,8 +666,10 @@ Before final submission:
   durable distributed audit log.
 - SHA-256 provenance is content addressing, not a signature or remote
   attestation.
-- One repair bounds compute but may trade away recovery on semantically hard
-  requests.
+- The independent action audit is still model-generated; it improves semantic
+  cross-checking but is not a formal natural-language proof.
+- One repair and one action audit bound compute but may trade away recovery on
+  semantically hard requests.
 - The engineering suite establishes mechanisms, not benchmark task quality;
   final competitiveness must be measured separately without changing the
   kernel toward benchmark-specific branches.

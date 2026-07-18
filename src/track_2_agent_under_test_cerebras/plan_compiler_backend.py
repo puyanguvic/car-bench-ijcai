@@ -35,6 +35,7 @@ class CerebrasCompilerSettings:
     max_completion_tokens: int
     temperature: float | None
     reasoning_effort: str | None
+    semantic_review: bool
     max_repair_attempts: int
     max_nodes: int
     max_dependency_depth: int
@@ -59,36 +60,35 @@ class CerebrasCompilerSettings:
             model=_env_text(
                 env,
                 "PACT_COMPILER_MODEL",
-                fallback_name="TRACK2_PLANNER_MODEL",
                 default=DEFAULT_EXECUTOR_MODEL,
             ),
             api_base=_env_text(
                 env,
                 "PACT_COMPILER_CEREBRAS_API_BASE",
-                fallback_name="TRACK2_CEREBRAS_API_BASE",
                 default=DEFAULT_CEREBRAS_API_BASE,
             ),
             service_tier=_env_optional_text(
                 env,
                 "PACT_COMPILER_SERVICE_TIER",
-                fallback_name="TRACK2_CEREBRAS_SERVICE_TIER",
             ),
             max_completion_tokens=_env_int(
                 env,
                 "PACT_COMPILER_MAX_COMPLETION_TOKENS",
-                fallback_name="TRACK2_PLANNER_MAX_COMPLETION_TOKENS",
-                default=4096,
+                default=8192,
             ),
             temperature=_env_optional_float(
                 env,
                 "PACT_COMPILER_TEMPERATURE",
-                fallback_name="TRACK2_PLANNER_TEMPERATURE",
             ),
             reasoning_effort=_env_optional_text(
                 env,
                 "PACT_COMPILER_REASONING_EFFORT",
-                fallback_name="TRACK2_PLANNER_REASONING_EFFORT",
-                default="low",
+                default="medium",
+            ),
+            semantic_review=_env_bool(
+                env,
+                "PACT_COMPILER_SEMANTIC_REVIEW",
+                default=True,
             ),
             max_repair_attempts=_env_int(
                 env,
@@ -229,7 +229,18 @@ class CerebrasStructuredPlanBackend:
         provider_usage = result.token_usage
         usage = CompilerTokenUsage(
             prompt_tokens=(provider_usage.input_tokens if provider_usage else 0),
-            completion_tokens=(provider_usage.output_tokens if provider_usage else 0),
+            # Cerebras includes reasoning tokens in completion_tokens.  A2A
+            # reports mutually exclusive visible-completion and thinking
+            # fields so the evaluator's sum does not double count reasoning.
+            completion_tokens=(
+                max(
+                    0,
+                    provider_usage.output_tokens
+                    - provider_usage.reasoning_output_tokens,
+                )
+                if provider_usage
+                else 0
+            ),
             thinking_tokens=(
                 provider_usage.reasoning_output_tokens if provider_usage else 0
             ),
@@ -259,29 +270,20 @@ def create_cerebras_semantic_compiler(
         client=client,
         logger=logger,
     )
-    return SemanticCompiler(backend, limits=resolved.limits())
-
-
-def _raw_env(
-    environ: Mapping[str, str],
-    name: str,
-    fallback_name: str | None,
-) -> str | None:
-    if name in environ:
-        return environ[name]
-    if fallback_name is not None:
-        return environ.get(fallback_name)
-    return None
+    return SemanticCompiler(
+        backend,
+        limits=resolved.limits(),
+        semantic_review=resolved.semantic_review,
+    )
 
 
 def _env_text(
     environ: Mapping[str, str],
     name: str,
     *,
-    fallback_name: str | None = None,
     default: str,
 ) -> str:
-    raw = _raw_env(environ, name, fallback_name)
+    raw = environ.get(name)
     return raw.strip() if raw is not None else default
 
 
@@ -289,10 +291,9 @@ def _env_optional_text(
     environ: Mapping[str, str],
     name: str,
     *,
-    fallback_name: str | None = None,
     default: str | None = None,
 ) -> str | None:
-    raw = _raw_env(environ, name, fallback_name)
+    raw = environ.get(name)
     if raw is None:
         return default
     normalized = raw.strip()
@@ -303,10 +304,9 @@ def _env_int(
     environ: Mapping[str, str],
     name: str,
     *,
-    fallback_name: str | None = None,
     default: int,
 ) -> int:
-    raw = _raw_env(environ, name, fallback_name)
+    raw = environ.get(name)
     if raw is None or not raw.strip():
         return default
     try:
@@ -318,16 +318,31 @@ def _env_int(
 def _env_optional_float(
     environ: Mapping[str, str],
     name: str,
-    *,
-    fallback_name: str | None = None,
 ) -> float | None:
-    raw = _raw_env(environ, name, fallback_name)
+    raw = environ.get(name)
     if raw is None or not raw.strip():
         return None
     try:
         return float(raw)
     except ValueError:
         raise CompilerConfigurationError(f"{name} must be a number") from None
+
+
+def _env_bool(
+    environ: Mapping[str, str],
+    name: str,
+    *,
+    default: bool,
+) -> bool:
+    raw = environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise CompilerConfigurationError(f"{name} must be a boolean")
 
 
 __all__ = [

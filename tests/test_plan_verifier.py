@@ -35,10 +35,11 @@ def tool(
     properties: dict[str, Any] | None = None,
     required: list[str] | None = None,
     confirmation: bool = False,
+    description: str = "Synthetic capability.",
 ) -> dict[str, Any]:
     function: dict[str, Any] = {
         "name": name,
-        "description": "Synthetic capability.",
+        "description": description,
         "parameters": {
             "type": "object",
             "properties": properties or {},
@@ -152,6 +153,42 @@ def test_snapshot_is_order_independent_and_content_addressed(
         for item in live_tools
     ]
     assert CapabilitySnapshot.from_tools(description_changed).digest != forward.digest
+
+
+def test_snapshot_recognizes_only_anchored_confirmation_contract_marker() -> None:
+    marked = CapabilitySnapshot.from_tools(
+        [
+            tool(
+                "mutate_resource",
+                description=(
+                    "  REQUIRES_CONFIRMATION, applies the requested mutation."
+                ),
+            )
+        ]
+    )
+    embedded = CapabilitySnapshot.from_tools(
+        [
+            tool(
+                "read_resource",
+                description="Mentions REQUIRES_CONFIRMATION only as documentation.",
+            )
+        ]
+    )
+    longer_identifier = CapabilitySnapshot.from_tools(
+        [
+            tool(
+                "read_other",
+                description="REQUIRES_CONFIRMATIONLESS synthetic marker.",
+            )
+        ]
+    )
+
+    assert marked.get("mutate_resource").requires_confirmation is True  # type: ignore[union-attr]
+    assert marked.get("mutate_resource").effect == "act"  # type: ignore[union-attr]
+    assert embedded.get("read_resource").requires_confirmation is False  # type: ignore[union-attr]
+    assert longer_identifier.get("read_other").requires_confirmation is False  # type: ignore[union-attr]
+    unmarked = CapabilitySnapshot.from_tools([tool("mutate_resource")])
+    assert marked.digest != unmarked.digest
 
 
 def test_snapshot_rejects_invalid_and_duplicate_contracts() -> None:

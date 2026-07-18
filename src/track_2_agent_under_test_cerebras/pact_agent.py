@@ -13,6 +13,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol, Sequence
 from uuid import uuid4
 
@@ -27,6 +28,7 @@ from carbench_agent_core.evidence_ledger import (
     EventDisposition,
     EvidenceLedger,
     EvidenceRecord,
+    EvidenceStatus,
     ExternalResultEvent,
     ExternalResultStatus,
     InputEvent,
@@ -40,7 +42,7 @@ from carbench_agent_core.obligation_runtime import (
     RespondAction,
     RuntimeAction,
 )
-from carbench_agent_core.plan_ir import ActNode
+from carbench_agent_core.plan_ir import ActNode, ConfirmNode
 from carbench_agent_core.plan_verifier import CapabilitySnapshot
 from carbench_agent_core.response_renderer import clean_user_content
 from carbench_agent_core.semantic_compiler import (
@@ -75,10 +77,63 @@ logger = configure_logger(role="agent_under_test", context="pact")
 _SAFE_FAILURE_TEXT = "I couldn't complete that request safely."
 _EXECUTION_FAILURE_TEXT = "I couldn't complete that action."
 _DECLINED_TEXT = "Understood. I won't proceed."
+_PARTIAL_DECLINED_TEXT = (
+    "I completed part of the request, and I won't proceed with the remaining action."
+)
 _CONFIRMATION_RETRY_TEXT = "Please answer yes or no."
 _WAITING_FOR_RESULT_TEXT = "I'm still waiting for the operation result."
 _PARTIAL_FAILURE_TEXT = (
     "I completed part of the request, but couldn't complete the remaining action."
+)
+_CONFIRMATION_FILLER_WORDS = frozenset(
+    {
+        "a",
+        "ahead",
+        "an",
+        "and",
+        "as",
+        "at",
+        "certainly",
+        "confirm",
+        "confirmed",
+        "continue",
+        "do",
+        "fine",
+        "first",
+        "go",
+        "good",
+        "i",
+        "if",
+        "it",
+        "just",
+        "need",
+        "needs",
+        "now",
+        "okay",
+        "ok",
+        "please",
+        "proceed",
+        "requested",
+        "right",
+        "sounds",
+        "still",
+        "sure",
+        "thanks",
+        "thank",
+        "the",
+        "this",
+        "that's",
+        "to",
+        "with",
+        "want",
+        "yeah",
+        "yep",
+        "yes",
+        "you",
+    }
+)
+_BOOLEAN_SCOPE_WORDS = frozenset(
+    {"disable", "disabled", "enable", "enabled", "false", "off", "on", "true"}
 )
 
 
@@ -187,12 +242,7 @@ class PACTAgentExecutor(AgentExecutor):
         compiler: SemanticCompilerProtocol | None = None,
         model: str | None = None,
     ) -> None:
-        self.model = (
-            model
-            or os.getenv("PACT_COMPILER_MODEL")
-            or os.getenv("TRACK2_PLANNER_MODEL")
-            or "gpt-oss-120b"
-        )
+        self.model = model or os.getenv("PACT_COMPILER_MODEL") or "gpt-oss-120b"
         self.compiler = compiler or create_cerebras_semantic_compiler(
             logger=logger.bind(context="compiler")
         )
@@ -311,6 +361,30 @@ class PACTAgentExecutor(AgentExecutor):
         runtime = state.runtime
         if runtime is None:  # pragma: no cover - narrowed by pending above
             return self._safe_terminal(state, _SAFE_FAILURE_TEXT)
+        if confirmation and _confirmation_revises_scope(
+            normalized_text,
+            runtime=runtime,
+            pending_node_id=pending.node_id,
+        ):
+            # A qualified "yes" is a new semantic request, not authorization
+            # for the immutable operation/arguments shown by this Confirm.
+            # Abandon the old horizon without manufacturing confirmation
+            # evidence; a new critical action must establish a fresh scope.
+            state.runtime = None
+            return await self._compile_and_emit(
+                state,
+                current_user_event=normalized_text,
+            )
+        snapshot = CapabilitySnapshot.from_tools(state.tools)
+        if not snapshot.is_valid or snapshot.digest != runtime.capability_digest:
+            # Confirmation is bound to the exact capability snapshot.  A
+            # changed contract is a replan boundary and cannot inherit the old
+            # scope.
+            state.runtime = None
+            return await self._compile_and_emit(
+                state,
+                current_user_event=normalized_text,
+            )
         application = runtime.apply_event(
             ConfirmationEvent(
                 event_id=_input_event_id(
@@ -323,17 +397,28 @@ class PACTAgentExecutor(AgentExecutor):
             )
         )
         if confirmation is False:
+            response_text = (
+                _PARTIAL_DECLINED_TEXT
+                if state.required_completion_evidence
+                else _DECLINED_TEXT
+            )
             state.runtime = None
             state.goal = ""
             state.required_completion_evidence.clear()
-            return self._text_message(state, _DECLINED_TEXT)
+            return self._text_message(state, response_text)
         if application.disposition != EventDisposition.APPLIED:
             return self._safe_terminal(state, _SAFE_FAILURE_TEXT)
-        state.runtime = None
-        return await self._compile_and_emit(
-            state,
-            current_user_event=normalized_text,
-        )
+        # Confirmation is a control event: it only releases an exact Act
+        # suffix that has already passed PlanIR and live-contract validation.
+        # Continuing the same immutable plan avoids asking the stochastic
+        # compiler to reconstruct an already verified authorization.
+        try:
+            action = self._step_runtime(state, runtime)
+        except EmissionRejectedError:
+            return self._safe_terminal(state, _SAFE_FAILURE_TEXT)
+        if action is None:
+            return self._safe_terminal(state, _SAFE_FAILURE_TEXT)
+        return self._action_message(state, action)
 
     async def _handle_tool_results(
         self,
@@ -674,6 +759,271 @@ def _parse_explicit_confirmation(text: str) -> bool | None:
     if positive:
         return True
     return None
+
+
+def _confirmation_revises_scope(
+    text: str,
+    *,
+    runtime: ObligationRuntime,
+    pending_node_id: str,
+) -> bool:
+    """Return whether a positive reply changes the authorized operation scope.
+
+    The accepted plan contains static operation arguments.  A qualified reply
+    must therefore trigger semantic recompilation instead of silently applying
+    the old values.  This check is deliberately domain-agnostic: it recognizes
+    generic revision language and lexical, boolean, or numeric values absent
+    from the exact descendant Act arguments.
+    """
+
+    node = runtime.plan.node_by_id.get(pending_node_id)
+    if not isinstance(node, ConfirmNode):
+        return True
+
+    normalized = re.sub(r"[^a-z0-9.%+\-']+", " ", text.casefold()).strip()
+    if re.search(
+        r"\b(but|instead|rather|except|change|modify|different|also|plus|"
+        r"switch|adjust|set|use)\b",
+        normalized,
+    ):
+        return True
+
+    authorized_targets = [
+        target
+        for target_id in node.authorizes
+        for target in (runtime.plan.node_by_id.get(target_id),)
+        if isinstance(target, ActNode)
+    ]
+    authorized_arguments = [target.arguments for target in authorized_targets]
+    authorized_numbers = {
+        canonical
+        for arguments in authorized_arguments
+        for value in _leaf_values(arguments)
+        for token in _numeric_tokens(value)
+        if (canonical := _canonical_number(token)) is not None
+    }
+    mentioned_numbers = {
+        canonical
+        for token in re.findall(r"(?<![a-z0-9])-?\d+(?:\.\d+)?", normalized)
+        if (canonical := _canonical_number(token)) is not None
+    }
+    qualitative_numbers, qualitative_words = _qualitative_number_scope(normalized)
+    mentioned_numbers.update(qualitative_numbers)
+
+    completed_scopes = [
+        (
+            _operation_words(record.operation),
+            _distinctive_operation_words(record.operation),
+            {
+                canonical
+                for value in _leaf_values(record.value)
+                for token in _numeric_tokens(value)
+                if (canonical := _canonical_number(token)) is not None
+            },
+        )
+        for record in runtime.ledger.evidence
+        if record.producer_kind == "act"
+        and record.status == EvidenceStatus.SUCCESS
+        and record.operation is not None
+    ]
+    consumed_completed_numbers: set[Decimal] = set()
+    for clause in re.split(r"(?:[.;!?]+|\b(?:and|but)\b)", normalized):
+        clause_words = set(re.findall(r"[a-z]+(?:'[a-z]+)?", clause))
+        if not clause_words:
+            continue
+        clause_numbers = {
+            canonical
+            for token in re.findall(r"(?<![a-z0-9])-?\d+(?:\.\d+)?", clause)
+            if (canonical := _canonical_number(token)) is not None
+        }
+        clause_qualitative_numbers, _ = _qualitative_number_scope(clause)
+        clause_numbers.update(clause_qualitative_numbers)
+        matching_authorized = [
+            target
+            for target in authorized_targets
+            if _scope_words_overlap(
+                clause_words,
+                _distinctive_operation_words(target.operation),
+            )
+        ]
+        if matching_authorized:
+            allowed = {
+                canonical
+                for target in matching_authorized
+                for value in _leaf_values(target.arguments)
+                for token in _numeric_tokens(value)
+                if (canonical := _canonical_number(token)) is not None
+            }
+            if clause_numbers.difference(allowed):
+                return True
+            continue
+        matching_completed = [
+            scope
+            for scope in completed_scopes
+            if _scope_words_overlap(clause_words, scope[1])
+        ]
+        if matching_completed:
+            allowed = {
+                number for scope in matching_completed for number in scope[2]
+            }
+            if clause_numbers.difference(allowed):
+                return True
+            consumed_completed_numbers.update(clause_numbers)
+
+    if mentioned_numbers.difference(
+        authorized_numbers | consumed_completed_numbers
+    ):
+        return True
+
+    authorized_words = {
+        word
+        for arguments in authorized_arguments
+        for word in _argument_words(arguments)
+    }
+    authorized_words.update(
+        word
+        for target in authorized_targets
+        for word in re.findall(r"[a-z]+", target.operation.casefold())
+    )
+    authorized_words.update(
+        word for scope in completed_scopes for word in scope[0]
+    )
+    authorized_boolean_words = {
+        word
+        for arguments in authorized_arguments
+        for value in _leaf_values(arguments)
+        if isinstance(value, bool)
+        for word in (
+            {"enable", "enabled", "on", "true"}
+            if value
+            else {"disable", "disabled", "false", "off"}
+        )
+    }
+    mentioned_words = set(re.findall(r"[a-z]+(?:'[a-z]+)?", normalized))
+    operation_scope_words = {
+        word
+        for target in authorized_targets
+        for word in _distinctive_operation_words(target.operation)
+    } | {word for scope in completed_scopes for word in scope[1]}
+    authorized_words.update(
+        word
+        for word in mentioned_words
+        if _scope_words_overlap({word}, operation_scope_words)
+    )
+    mentioned_boolean_words = mentioned_words & _BOOLEAN_SCOPE_WORDS
+    if mentioned_boolean_words.difference(authorized_boolean_words):
+        return True
+    unexplained_words = mentioned_words.difference(
+        _CONFIRMATION_FILLER_WORDS
+        | authorized_words
+        | authorized_boolean_words
+        | qualitative_words
+    )
+    return bool(unexplained_words)
+
+
+def _leaf_values(value: Any):
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from _leaf_values(nested)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            yield from _leaf_values(nested)
+        return
+    yield value
+
+
+def _argument_words(value: Any):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            yield from re.findall(r"[a-z]+", str(key).casefold())
+            yield from _argument_words(nested)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            yield from _argument_words(nested)
+        return
+    if isinstance(value, str):
+        yield from re.findall(r"[a-z]+(?:'[a-z]+)?", value.casefold())
+
+
+def _numeric_tokens(value: Any):
+    if isinstance(value, bool):
+        return ()
+    if isinstance(value, (int, float)):
+        return (value,)
+    if isinstance(value, str):
+        return tuple(re.findall(r"(?<![a-z0-9])-?\d+(?:\.\d+)?", value.casefold()))
+    return ()
+
+
+def _qualitative_number_scope(text: str) -> tuple[set[Decimal], set[str]]:
+    """Map a small domain-neutral set of explicit extent phrases to numbers."""
+
+    numbers: set[Decimal] = set()
+    words: set[str] = set()
+    extent_patterns = (
+        (r"\b(all the way|fully|full|maximum|max)\b", Decimal(100)),
+        (r"\b(half way|halfway|half)\b", Decimal(50)),
+        (r"\b(zero|minimum|min)\b", Decimal(0)),
+    )
+    for pattern, value in extent_patterns:
+        for match in re.finditer(pattern, text):
+            numbers.add(value)
+            words.update(re.findall(r"[a-z]+", match.group(0)))
+    return numbers, words
+
+
+def _operation_words(operation: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", operation.casefold()))
+
+
+def _distinctive_operation_words(operation: str) -> set[str]:
+    words = _operation_words(operation)
+    generic = {
+        "act",
+        "apply",
+        "change",
+        "close",
+        "create",
+        "delete",
+        "execute",
+        "get",
+        "open",
+        "read",
+        "run",
+        "send",
+        "set",
+        "tool",
+        "update",
+        "write",
+    }
+    distinctive = words.difference(generic)
+    return distinctive or words
+
+
+def _scope_words_overlap(left: set[str], right: set[str]) -> bool:
+    """Match exact or informative compound fragments across a scope clause."""
+
+    return any(
+        first == second
+        or (
+            min(len(first), len(second)) >= 4
+            and (first in second or second in first)
+        )
+        for first in left
+        for second in right
+    )
+
+
+def _canonical_number(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        return Decimal(str(value)).normalize()
+    except InvalidOperation:
+        return None
 
 
 def _parse_result_envelope(

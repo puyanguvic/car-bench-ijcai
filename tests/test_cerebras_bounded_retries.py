@@ -294,6 +294,26 @@ def test_pact_budget_environment_names_take_precedence(
     assert client.max_rate_limit_wait_seconds == 7.5
 
 
+def test_archived_rate_limit_environment_names_are_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PACT_CEREBRAS_MAX_RATE_LIMIT_RETRIES", raising=False)
+    monkeypatch.delenv("PACT_CEREBRAS_MAX_RATE_LIMIT_WAIT_SECONDS", raising=False)
+    monkeypatch.setenv("TRACK2_CEREBRAS_MAX_RATE_LIMIT_RETRIES", "9")
+    monkeypatch.setenv("TRACK2_CEREBRAS_MAX_RATE_LIMIT_WAIT_SECONDS", "99")
+
+    client = CerebrasCompletionClient(sdk_client=FakeSDKClient([]))
+
+    assert (
+        client.max_rate_limit_retries
+        == client_module.DEFAULT_CEREBRAS_MAX_RATE_LIMIT_RETRIES
+    )
+    assert (
+        client.max_rate_limit_wait_seconds
+        == client_module.DEFAULT_CEREBRAS_MAX_RATE_LIMIT_WAIT_SECONDS
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

@@ -20,8 +20,16 @@ obligations, and only then emits one externally visible action.
   satisfied. Completion claims require successful external evidence.
 - Every final A2A text response reports aggregate `turn_metrics`, including
   `prompt_tokens`, `completion_tokens`, and `thinking_tokens`.
-- One initial compiler call and at most one bounded repair call are allowed for
-  each compilation, below Track 2's five-sequential-call limit.
+- Each compilation uses one proposal and at most one verification-guided
+  repair. A locally valid plan containing an action receives one independent
+  full-policy and argument-provenance audit. The worst case is three sequential
+  completions, below Track 2's five-call limit; answer/refusal-only plans skip
+  the audit.
+- Exact confirmations and successful actions advance the already-verified
+  immutable suffix without another model call. Ask answers, observations, and
+  revised confirmations are replan boundaries. A capability change detected
+  while releasing a confirmation triggers a fresh compile; one detected at
+  external-call emission rejects the call and fails closed.
 
 Provider output uses a compact Cerebras strict JSON schema. The richer plan is
 decoded and checked locally, so malformed or unverifiable output fails closed
@@ -37,8 +45,9 @@ GEMINI_API_KEY=...
 CEREBRAS_API_KEY=...
 PACT_COMPILER_MODEL=gpt-oss-120b
 PACT_COMPILER_CEREBRAS_API_BASE=https://api.cerebras.ai
-PACT_COMPILER_REASONING_EFFORT=low
-PACT_COMPILER_MAX_COMPLETION_TOKENS=4096
+PACT_COMPILER_REASONING_EFFORT=medium
+PACT_COMPILER_MAX_COMPLETION_TOKENS=8192
+PACT_COMPILER_SEMANTIC_REVIEW=true
 ```
 
 The final submission template exposes the following runtime settings:
@@ -49,8 +58,9 @@ The final submission template exposes the following runtime settings:
 | `PACT_COMPILER_MODEL` | `gpt-oss-120b` | Cerebras-hosted compiler model. A legacy `cerebras/` prefix is normalized by the client. |
 | `PACT_COMPILER_CEREBRAS_API_BASE` | `https://api.cerebras.ai` | Configurable provider/API route. |
 | `PACT_COMPILER_SERVICE_TIER` | unset | Optional Cerebras service tier. |
-| `PACT_COMPILER_REASONING_EFFORT` | `low` | `low`, `medium`, or `high`; `low` preserves output budget for the structured plan on large live capability surfaces. |
-| `PACT_COMPILER_MAX_COMPLETION_TOKENS` | `4096` | Per compiler-call completion-token cap. |
+| `PACT_COMPILER_REASONING_EFFORT` | `medium` | `low`, `medium`, or `high`; the submitted setting gives the policy/argument audit a moderate reasoning budget. |
+| `PACT_COMPILER_MAX_COMPLETION_TOKENS` | `8192` | Per compiler-call completion-token cap, including provider reasoning tokens. |
+| `PACT_COMPILER_SEMANTIC_REVIEW` | `true` | Run one independently prompted, locally reverified audit for action-bearing plans. |
 | `PACT_COMPILER_TEMPERATURE` | unset | Optional sampling temperature in `[0, 2]`; unset uses the provider default. |
 | `PACT_COMPILER_MAX_REPAIR_ATTEMPTS` | `1` | Local verification repair budget; only `0` or `1` is accepted. |
 | `PACT_CEREBRAS_MAX_RATE_LIMIT_RETRIES` | `3` | Maximum number of provider rate-limit retries per compiler call. |
@@ -67,11 +77,9 @@ The local verifier limits are also configurable as
 `PACT_COMPILER_MAX_EVIDENCE_RECORDS`. Their defaults are defined and validated
 in `plan_compiler_backend.py`.
 
-Compatibility note: the runtime accepts the old `TRACK2_PLANNER_*` names as
-fallbacks for the compiler's main settings, and the shared Cerebras client still
-accepts legacy `TRACK2_CEREBRAS_*` low-level pacing controls. New deployments
-and the final scenario should use only the `PACT_*` main configuration shown
-above. Legacy `TRACK2_EXECUTOR_*` settings do not configure the PACT compiler.
+PACT intentionally ignores archived `TRACK2_PLANNER_*`, `TRACK2_EXECUTOR_*`,
+and `TRACK2_CEREBRAS_*` variables. This prevents a stale V1 environment from
+silently changing the submitted compiler model, reasoning effort, or budgets.
 
 ## Local Validation
 
@@ -90,7 +98,7 @@ uv run python generate_compose.py \
   --scenario scenarios/track_2_agent_under_test_cerebras/local_docker_smoke.toml
 docker compose --env-file .env \
   -f scenarios/track_2_agent_under_test_cerebras/docker-compose.yml \
-  up --abort-on-container-exit
+  up --abort-on-container-exit --exit-code-from a2a-client
 ```
 
 ## Option C: GHCR Image Validation
@@ -103,6 +111,7 @@ its summary records the immutable digest. For a manual build:
 PACT_IMAGE=ghcr.io/puyanguvic/car-bench-track-2-direct
 PACT_TAG=track2-pact-rc
 docker buildx build --platform linux/amd64 \
+  --provenance=false \
   -f src/track_2_agent_under_test_cerebras/Dockerfile.track-2-agent-under-test-cerebras \
   -t "${PACT_IMAGE}:${PACT_TAG}" --push .
 docker buildx imagetools inspect "${PACT_IMAGE}:${PACT_TAG}"
@@ -119,7 +128,7 @@ uv run python generate_compose.py \
   --scenario scenarios/track_2_agent_under_test_cerebras/ghcr_smoke.toml
 docker compose --env-file .env \
   -f scenarios/track_2_agent_under_test_cerebras/docker-compose.yml \
-  up --abort-on-container-exit
+  up --abort-on-container-exit --exit-code-from a2a-client
 ```
 
 This is the README option C required by the submission checklist: it exercises

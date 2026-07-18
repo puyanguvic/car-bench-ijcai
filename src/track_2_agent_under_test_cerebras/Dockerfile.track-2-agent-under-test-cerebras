@@ -50,7 +50,9 @@ COPY --chown=carbench:carbench \
 
 ENV PYTHONPATH=/home/carbench/app/src
 ENV PACT_COMPILER_MODEL=gpt-oss-120b
-ENV PACT_COMPILER_REASONING_EFFORT=low
+ENV PACT_COMPILER_REASONING_EFFORT=medium
+ENV PACT_COMPILER_MAX_COMPLETION_TOKENS=8192
+ENV PACT_COMPILER_SEMANTIC_REVIEW=true
 
 ENTRYPOINT [".venv/bin/python", "src/track_2_agent_under_test_cerebras/server.py"]
 CMD ["--host", "0.0.0.0"]

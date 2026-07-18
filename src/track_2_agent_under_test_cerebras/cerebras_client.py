@@ -307,80 +307,47 @@ class CerebrasCompletionClient:
         self.service_tier = service_tier.strip() if service_tier else None
         self.logger = logger
         self.queue_backoff_seconds = _env_float(
-            (
-                "PACT_CEREBRAS_QUEUE_BACKOFF_SECONDS",
-                "TRACK2_CEREBRAS_QUEUE_BACKOFF_SECONDS",
-            ),
+            ("PACT_CEREBRAS_QUEUE_BACKOFF_SECONDS",),
             DEFAULT_CEREBRAS_QUEUE_BACKOFF_SECONDS,
         )
         self.queue_backoff_initial_jitter_ratio = _env_float(
-            (
-                "PACT_CEREBRAS_QUEUE_BACKOFF_INITIAL_JITTER_RATIO",
-                "TRACK2_CEREBRAS_QUEUE_BACKOFF_INITIAL_JITTER_RATIO",
-            ),
+            ("PACT_CEREBRAS_QUEUE_BACKOFF_INITIAL_JITTER_RATIO",),
             DEFAULT_CEREBRAS_QUEUE_BACKOFF_INITIAL_JITTER_RATIO,
         )
         self.queue_backoff_second_min_seconds = _env_float(
-            (
-                "PACT_CEREBRAS_QUEUE_BACKOFF_SECOND_MIN_SECONDS",
-                "TRACK2_CEREBRAS_QUEUE_BACKOFF_SECOND_MIN_SECONDS",
-            ),
+            ("PACT_CEREBRAS_QUEUE_BACKOFF_SECOND_MIN_SECONDS",),
             DEFAULT_CEREBRAS_QUEUE_BACKOFF_SECOND_MIN_SECONDS,
         )
         self.queue_backoff_second_max_seconds = _env_float(
-            (
-                "PACT_CEREBRAS_QUEUE_BACKOFF_SECOND_MAX_SECONDS",
-                "TRACK2_CEREBRAS_QUEUE_BACKOFF_SECOND_MAX_SECONDS",
-            ),
+            ("PACT_CEREBRAS_QUEUE_BACKOFF_SECOND_MAX_SECONDS",),
             DEFAULT_CEREBRAS_QUEUE_BACKOFF_SECOND_MAX_SECONDS,
         )
         self.queue_backoff_cap_min_seconds = _env_float(
-            (
-                "PACT_CEREBRAS_QUEUE_BACKOFF_CAP_MIN_SECONDS",
-                "TRACK2_CEREBRAS_QUEUE_BACKOFF_CAP_MIN_SECONDS",
-            ),
+            ("PACT_CEREBRAS_QUEUE_BACKOFF_CAP_MIN_SECONDS",),
             DEFAULT_CEREBRAS_QUEUE_BACKOFF_CAP_MIN_SECONDS,
         )
         self.queue_backoff_cap_max_seconds = _env_float(
-            (
-                "PACT_CEREBRAS_QUEUE_BACKOFF_CAP_MAX_SECONDS",
-                "TRACK2_CEREBRAS_QUEUE_BACKOFF_CAP_MAX_SECONDS",
-            ),
+            ("PACT_CEREBRAS_QUEUE_BACKOFF_CAP_MAX_SECONDS",),
             DEFAULT_CEREBRAS_QUEUE_BACKOFF_CAP_MAX_SECONDS,
         )
         self.rate_limit_retry_buffer_seconds = _env_float(
-            (
-                "PACT_CEREBRAS_RATE_LIMIT_RETRY_BUFFER_SECONDS",
-                "TRACK2_CEREBRAS_RATE_LIMIT_RETRY_BUFFER_SECONDS",
-            ),
+            ("PACT_CEREBRAS_RATE_LIMIT_RETRY_BUFFER_SECONDS",),
             DEFAULT_CEREBRAS_RATE_LIMIT_RETRY_BUFFER_SECONDS,
         )
         self.proactive_token_pacing = _env_bool(
-            (
-                "PACT_CEREBRAS_PROACTIVE_TOKEN_PACING",
-                "TRACK2_CEREBRAS_PROACTIVE_TOKEN_PACING",
-            ),
+            ("PACT_CEREBRAS_PROACTIVE_TOKEN_PACING",),
             default=True,
         )
         self.token_quota_window_seconds = _env_float(
-            (
-                "PACT_CEREBRAS_TOKEN_QUOTA_WINDOW_SECONDS",
-                "TRACK2_CEREBRAS_TOKEN_QUOTA_WINDOW_SECONDS",
-            ),
+            ("PACT_CEREBRAS_TOKEN_QUOTA_WINDOW_SECONDS",),
             DEFAULT_CEREBRAS_TOKEN_QUOTA_WINDOW_SECONDS,
         )
         self.max_rate_limit_retries = _env_nonnegative_int(
-            (
-                "PACT_CEREBRAS_MAX_RATE_LIMIT_RETRIES",
-                "TRACK2_CEREBRAS_MAX_RATE_LIMIT_RETRIES",
-            ),
+            ("PACT_CEREBRAS_MAX_RATE_LIMIT_RETRIES",),
             DEFAULT_CEREBRAS_MAX_RATE_LIMIT_RETRIES,
         )
         self.max_rate_limit_wait_seconds = _env_nonnegative_float(
-            (
-                "PACT_CEREBRAS_MAX_RATE_LIMIT_WAIT_SECONDS",
-                "TRACK2_CEREBRAS_MAX_RATE_LIMIT_WAIT_SECONDS",
-            ),
+            ("PACT_CEREBRAS_MAX_RATE_LIMIT_WAIT_SECONDS",),
             DEFAULT_CEREBRAS_MAX_RATE_LIMIT_WAIT_SECONDS,
         )
         self.rate_limit_report_dir = Path(
