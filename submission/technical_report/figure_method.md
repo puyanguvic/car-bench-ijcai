@@ -8,9 +8,16 @@ Inputs arrive over A2A as three visually separated objects: trusted policy,
 the latest user/tool event, and the current live function contracts (tool name,
 description, and Draft 2020-12 argument schema). A Cerebras-hosted semantic
 compiler produces a compact typed obligation-plan DAG. It may make one initial
-structured-output call and at most one bounded repair call. The graph has five
-node kinds: Observe, Ask, Confirm, Act, and Respond. Confirm nodes explicitly
-name their downstream Act targets.
+structured-output call and at most one bounded repair call. An action-bearing
+candidate then receives one same-model audit and full deterministic
+reverification. Thus the longest semantic path is three serial model calls
+with fan-out one. Each provider request may be retried at most three times
+within 600 seconds of scheduled retry wait. Track 2 accounting distinguishes
+the maximum three completed model calls from at most twelve HTTP attempts per
+horizon; a rate-limited attempt returns no completion or tokens. Exported quota
+wait excludes waits from an invocation that exhausts its retry budget and
+raises. The graph has five node kinds: Observe, Ask, Confirm, Act, and Respond.
+Confirm nodes explicitly name their downstream Act targets.
 
 The candidate crosses into a shaded Trusted PACT Kernel. First, the static
 PlanVerifier checks DAG structure and bounds, live capability membership, the
@@ -23,17 +30,19 @@ value-redacted repair report, then fails safely if still invalid.
 An accepted graph enters the deterministic ObligationRuntime. The runtime
 emits exactly one ready benchmark-visible action. Immediately before any
 external call, it rebuilds the live capability snapshot, compares the snapshot
-and immutable plan digests, and revalidates the exact arguments. Ask and
-Confirm wait for a correlated A2A user event. Observe and Act wait for one
-strictly correlated evaluator result.
+and immutable plan digests, and revalidates the exact arguments. Ask waits for
+a correlated A2A user event; Observe and Act wait for one strictly correlated
+evaluator result. A qualified positive Confirm authorizes only its named Act.
 
 An append-only EvidenceLedger records success, failure, or observed input with
 event ID, internal and evaluator call IDs, context, plan, node, operation,
 argument digest, capability digest, and producer kind. Positive confirmation
 is a one-shot authorization scoped to the exact operation, argument digest,
 and capability snapshot. Failed, malformed, stale, replayed, or mismatched
-events never satisfy success obligations. Successful Observe/Ask/Confirm events
-trigger receding-horizon recompilation; successful Acts remain durable
+events never satisfy success obligations. Observe and free-form Ask responses
+are semantic data events that trigger receding-horizon recompilation. An exact
+positive Confirm and a matched successful Act are control events that advance
+the verified suffix without another model call. Successful Acts remain durable
 completion obligations. A Completed terminal is emitted only with successful
 external Act evidence. Partial failure is reported without erasing already
 completed effects.

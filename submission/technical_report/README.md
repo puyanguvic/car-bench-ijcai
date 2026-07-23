@@ -1,9 +1,10 @@
 # PACT Track 2 IJCAI technical report
 
-This directory contains the four-page report for the final PACT obligation
-runtime. It describes the submitted PACT V2 path only; earlier selective
-workflow prototypes and their development scores are not evidence for this
-system.
+This directory contains the report for the final PACT obligation runtime. The
+CAR-bench limit is up to four pages of main text; references are excluded from
+that limit. The report describes the submitted PACT V2 path only; earlier
+selective workflow prototypes and their development scores are not evidence for
+this system.
 
 The IJCAI-ECAI 2026 author-kit files are vendored unchanged under
 `official_template/`. Build from this directory with:
